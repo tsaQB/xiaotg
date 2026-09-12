@@ -202,7 +202,7 @@ cp .env.example .env
 ### 1. Kompilasi Release:
 ```bash
 # Clone repositori
-git clone https://github.com/tsaQB/xiaochat.git ~/xiao
+git clone https://github.com/tsaQB/xiaotg.git ~/xiao
 cd ~/xiao
 
 # Build biner teroptimasi
@@ -245,6 +245,6 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 
 Dibuat dengan dedikasi tinggi untuk performa, privasi, dan keandalan.
 
-**[xiao](https://github.com/tsaQB/xiaochat)** © 2026 Assaqib
+**[xiao](https://github.com/tsaQB/xiaotg)** © 2026 Assaqib
 
 </div>
