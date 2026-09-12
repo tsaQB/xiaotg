@@ -751,6 +751,13 @@ pub(crate) async fn run_cli_status(ai_service: &AIChatService) {
         };
         println!("  {:<12} → {} ({health})", role.display_name(), route_text);
     }
+
+    // 4. Web Search & Tools Status
+    println!("\nWeb Search & Tools:");
+    let (search_engine_str, mcp_url) = crate::ai::tools::get_search_engine_status();
+    println!("  Search Engine → {}", search_engine_str);
+    println!("  MCP Hosted    → {}", mcp_url);
+    println!("  Fetch Engine  → \x1b[32mEnabled\x1b[0m (Auto Link Reader & Extract)");
     println!();
 }
 

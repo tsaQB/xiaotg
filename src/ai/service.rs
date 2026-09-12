@@ -813,6 +813,13 @@ pub struct AIChatService {
     pub model_picker_query: Arc<RwLock<HashMap<i64, String>>>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct PendingToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
+}
+
 impl AIChatService {
     pub fn new() -> Self {
         for key in [
@@ -2223,6 +2230,12 @@ impl AIChatService {
             }));
         }
 
+        let cap_record = self.capability_record(&provider.endpoint, model).await;
+        let supports_tools = cap_record
+            .as_ref()
+            .map(|r| r.effective_state_for(CapabilityKind::Tools) != CapabilityState::Unsupported)
+            .unwrap_or(true);
+
         let url = provider_url(&provider.endpoint, "chat/completions");
         let mut payload = json!({
             "model": model,
@@ -2240,72 +2253,65 @@ impl AIChatService {
                 .iter()
                 .any(|k| provider.api_key.eq_ignore_ascii_case(k));
 
-        let mut response = None;
-        let mut terminal_transport_failure = false;
-        for attempt in 0..MAX_PROVIDER_ATTEMPTS {
-            let mut req = self
-                .client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .json(&payload)
-                .timeout(Duration::from_secs(180));
-            if use_auth {
-                req = req.header("Authorization", format!("Bearer {}", provider.api_key));
+        let mut accumulated_raw = String::new();
+        let mut accumulated_reasoning = String::new();
+        let mut cancelled = false;
+        let mut stream_bounded = false;
+        let mut stream_interrupted = false;
+        let mut has_started_answer = false;
+
+        for turn in 0..2 {
+            accumulated_raw.clear();
+            accumulated_reasoning.clear();
+            let mut accumulated_tool_calls: Vec<PendingToolCall> = Vec::new();
+            let mut streamed_wire_bytes = 0usize;
+            let mut stream_done = false;
+
+            if turn == 0 && supports_tools {
+                payload["tools"] = crate::ai::tools::get_tools_definition();
+            } else {
+                payload.as_object_mut().map(|m| m.remove("tools"));
             }
 
-            let mut send_future = Box::pin(req.send());
-            let send_result = tokio::select! {
-                changed = cancel_rx.changed() => {
-                    if changed.is_ok() && *cancel_rx.borrow() {
-                        if let Some(tl) = timeline {
-                            tl.fail_current("Stopped by user".to_string()).await;
-                            tl.stop_ticker();
-                        }
-                        return (None, "⏹️ Generasi dihentikan oleh pengguna.".to_string(), true);
-                    }
-                    send_future.as_mut().await
+            let mut response = None;
+            let mut terminal_transport_failure = false;
+            for attempt in 0..MAX_PROVIDER_ATTEMPTS {
+                let mut req = self
+                    .client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&payload)
+                    .timeout(Duration::from_secs(180));
+                if use_auth {
+                    req = req.header("Authorization", format!("Bearer {}", provider.api_key));
                 }
-                result = send_future.as_mut() => result,
-            };
 
-            match send_result {
-                Ok(resp)
-                    if is_retryable_status(resp.status())
-                        && attempt + 1 < MAX_PROVIDER_ATTEMPTS =>
-                {
-                    let status = resp.status();
-                    let delay = retry_delay(resp.headers(), attempt);
-                    drop(resp);
-                    warn!(
-                        "Transient provider status {}; retrying attempt {}/{}",
-                        status.as_u16(),
-                        attempt + 2,
-                        MAX_PROVIDER_ATTEMPTS
-                    );
-                    tokio::select! {
-                        _ = tokio::time::sleep(delay) => {}
-                        changed = cancel_rx.changed() => {
-                            if changed.is_ok() && *cancel_rx.borrow() {
-                                if let Some(tl) = timeline {
-                                    tl.fail_current("Stopped by user".to_string()).await;
-                                    tl.stop_ticker();
-                                }
-                                return (None, "⏹️ Generasi dihentikan oleh pengguna.".to_string(), true);
+                let mut send_future = Box::pin(req.send());
+                let send_result = tokio::select! {
+                    changed = cancel_rx.changed() => {
+                        if changed.is_ok() && *cancel_rx.borrow() {
+                            if let Some(tl) = timeline {
+                                tl.fail_current("Stopped by user".to_string()).await;
+                                tl.stop_ticker();
                             }
+                            return (None, "⏹️ Generasi dihentikan oleh pengguna.".to_string(), true);
                         }
+                        send_future.as_mut().await
                     }
-                }
-                Ok(resp) => {
-                    response = Some(resp);
-                    break;
-                }
-                Err(e) => {
-                    let retryable_transport = e.is_timeout() || e.is_connect();
-                    if retryable_transport && attempt + 1 < MAX_PROVIDER_ATTEMPTS {
-                        let delay =
-                            Duration::from_millis(500_u64.saturating_mul(1_u64 << attempt.min(5)));
+                    result = send_future.as_mut() => result,
+                };
+
+                match send_result {
+                    Ok(resp)
+                        if is_retryable_status(resp.status())
+                            && attempt + 1 < MAX_PROVIDER_ATTEMPTS =>
+                    {
+                        let status = resp.status();
+                        let delay = retry_delay(resp.headers(), attempt);
+                        drop(resp);
                         warn!(
-                            "Transient provider transport failure; retrying attempt {}/{}",
+                            "Transient provider status {}; retrying attempt {}/{}",
+                            status.as_u16(),
                             attempt + 2,
                             MAX_PROVIDER_ATTEMPTS
                         );
@@ -2321,196 +2327,362 @@ impl AIChatService {
                                 }
                             }
                         }
-                    } else {
-                        error!(
-                            "Error sending AI completion request: {}",
-                            if e.is_timeout() {
-                                "timeout"
-                            } else {
-                                "transport failure"
+                    }
+                    Ok(resp) if resp.status().as_u16() == 400 && payload.get("tools").is_some() => {
+                        drop(resp);
+                        warn!("Provider rejected tools parameter (HTTP 400); retrying without tools");
+                        payload.as_object_mut().unwrap().remove("tools");
+                        continue;
+                    }
+                    Ok(resp) => {
+                        response = Some(resp);
+                        break;
+                    }
+                    Err(e) => {
+                        let retryable_transport = e.is_timeout() || e.is_connect();
+                        if retryable_transport && attempt + 1 < MAX_PROVIDER_ATTEMPTS {
+                            let delay =
+                                Duration::from_millis(500_u64.saturating_mul(1_u64 << attempt.min(5)));
+                            warn!(
+                                "Transient provider transport failure; retrying attempt {}/{}",
+                                attempt + 2,
+                                MAX_PROVIDER_ATTEMPTS
+                            );
+                            tokio::select! {
+                                _ = tokio::time::sleep(delay) => {}
+                                changed = cancel_rx.changed() => {
+                                    if changed.is_ok() && *cancel_rx.borrow() {
+                                        if let Some(tl) = timeline {
+                                            tl.fail_current("Stopped by user".to_string()).await;
+                                            tl.stop_ticker();
+                                        }
+                                        return (None, "⏹️ Generasi dihentikan oleh pengguna.".to_string(), true);
+                                    }
+                                }
                             }
-                        );
-                        terminal_transport_failure = true;
-                        break;
+                        } else {
+                            error!(
+                                "Error sending AI completion request: {}",
+                                if e.is_timeout() {
+                                    "timeout"
+                                } else {
+                                    "transport failure"
+                                }
+                            );
+                            terminal_transport_failure = true;
+                            break;
+                        }
                     }
                 }
             }
-        }
 
-        let Some(resp) = response else {
-            if let Some(tl) = timeline {
-                tl.fail_current("Provider connection failed".to_string())
-                    .await;
-                tl.sync_draft(true).await;
-            }
-            return (
-                None,
-                if terminal_transport_failure {
-                    "⚠️ Terjadi kendala saat memproses jawaban AI.".to_string()
-                } else {
-                    "⚠️ Provider tidak merespons setelah beberapa percobaan.".to_string()
-                },
-                false,
-            );
-        };
-
-        if !resp.status().is_success() {
-            let status_code = resp.status().as_u16();
-            drop(resp);
-            error!("AI endpoint returned status {status_code}");
-            if let Some(tl) = timeline {
-                tl.fail_current(format!("API status {status_code}")).await;
-                tl.sync_draft(true).await;
-            }
-            return (
-                None,
-                format!("⚠️ Gagal menghubungi AI proxy: {status_code}"),
-                false,
-            );
-        }
-
-        let mut stream = resp.bytes_stream();
-        let mut decoder = SseDecoder::default();
-        let mut accumulated_raw = String::new();
-        let mut accumulated_reasoning = String::new();
-        let mut has_started_answer = false;
-        let mut streamed_wire_bytes = 0usize;
-
-        let mut cancelled = false;
-        let mut stream_interrupted = false;
-        let mut stream_bounded = false;
-        let mut stream_done = false;
-        'streaming: while !stream_done {
-            let mut next_future = Box::pin(stream.next());
-            let next_item = tokio::select! {
-                changed = cancel_rx.changed() => {
-                    if changed.is_ok() && *cancel_rx.borrow() {
-                        cancelled = true;
-                        None
+            let Some(resp) = response else {
+                if let Some(tl) = timeline {
+                    tl.fail_current("Provider connection failed".to_string())
+                        .await;
+                    tl.sync_draft(true).await;
+                }
+                return (
+                    None,
+                    if terminal_transport_failure {
+                        "⚠️ Terjadi kendala saat memproses jawaban AI.".to_string()
                     } else {
-                        next_future.as_mut().await
-                    }
-                }
-                item = next_future.as_mut() => item,
+                        "⚠️ Provider tidak merespons setelah beberapa percobaan.".to_string()
+                    },
+                    false,
+                );
             };
 
-            let Some(item) = next_item else {
-                break;
-            };
-            let bytes = match item {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    stream_interrupted = true;
-                    warn!("AI response stream interrupted");
-                    break;
+            if !resp.status().is_success() {
+                let status_code = resp.status().as_u16();
+                drop(resp);
+                error!("AI endpoint returned status {status_code}");
+                if let Some(tl) = timeline {
+                    tl.fail_current(format!("API status {status_code}")).await;
+                    tl.sync_draft(true).await;
                 }
-            };
-            streamed_wire_bytes = streamed_wire_bytes.saturating_add(bytes.len());
-            if streamed_wire_bytes > MAX_STREAM_WIRE_BYTES {
-                stream_bounded = true;
-                stream_interrupted = true;
-                warn!("AI response exceeded XiaoAI's absolute streamed payload limit");
-                break;
+                return (
+                    None,
+                    format!("⚠️ Gagal menghubungi AI proxy: {status_code}"),
+                    false,
+                );
             }
 
-            let events = match decoder.push(&bytes) {
-                Ok(events) => events,
-                Err(error) => {
-                    stream_interrupted = true;
-                    warn!("AI response SSE decode failed: {error}");
+            let mut stream = resp.bytes_stream();
+            let mut decoder = SseDecoder::default();
+
+            'streaming: while !stream_done {
+                let mut next_future = Box::pin(stream.next());
+                let next_item = tokio::select! {
+                    changed = cancel_rx.changed() => {
+                        if changed.is_ok() && *cancel_rx.borrow() {
+                            cancelled = true;
+                            None
+                        } else {
+                            next_future.as_mut().await
+                        }
+                    }
+                    item = next_future.as_mut() => item,
+                };
+
+                let Some(item) = next_item else {
                     break;
-                }
-            };
-            for event in events {
-                match event {
-                    StreamEvent::Done => {
-                        stream_done = true;
+                };
+                let bytes = match item {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        stream_interrupted = true;
+                        warn!("AI response stream interrupted");
                         break;
                     }
-                    StreamEvent::Json(data) => {
-                        let Some(delta) = data
-                            .get("choices")
-                            .and_then(|choices| choices.get(0))
-                            .and_then(|choice| choice.get("delta"))
-                        else {
-                            continue;
-                        };
+                };
+                streamed_wire_bytes = streamed_wire_bytes.saturating_add(bytes.len());
+                if streamed_wire_bytes > MAX_STREAM_WIRE_BYTES {
+                    stream_bounded = true;
+                    stream_interrupted = true;
+                    warn!("AI response exceeded XiaoAI's absolute streamed payload limit");
+                    break;
+                }
 
-                        if let Some(reasoning_chunk) =
-                            delta.get("reasoning_content").and_then(Value::as_str)
-                        {
+                let events = match decoder.push(&bytes) {
+                    Ok(events) => events,
+                    Err(error) => {
+                        stream_interrupted = true;
+                        warn!("AI response SSE decode failed: {error}");
+                        break;
+                    }
+                };
+                for event in events {
+                    match event {
+                        StreamEvent::Done => {
+                            stream_done = true;
+                            break;
+                        }
+                        StreamEvent::Json(data) => {
+                            let Some(delta) = data
+                                .get("choices")
+                                .and_then(|choices| choices.get(0))
+                                .and_then(|choice| choice.get("delta"))
+                            else {
+                                continue;
+                            };
+
+                            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                                for tc in tool_calls {
+                                    let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                                    while accumulated_tool_calls.len() <= index {
+                                        accumulated_tool_calls.push(PendingToolCall::default());
+                                    }
+                                    if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                                        accumulated_tool_calls[index].id.push_str(id);
+                                    }
+                                    if let Some(func) = tc.get("function") {
+                                        if let Some(name) = func.get("name").and_then(Value::as_str) {
+                                            accumulated_tool_calls[index].name.push_str(name);
+                                        }
+                                        if let Some(args) = func.get("arguments").and_then(Value::as_str) {
+                                            accumulated_tool_calls[index].arguments.push_str(args);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Some(reasoning_chunk) =
+                                delta.get("reasoning_content").and_then(Value::as_str)
+                            {
+                                if !push_bounded(
+                                    &mut accumulated_reasoning,
+                                    reasoning_chunk,
+                                    MAX_STREAM_REASONING_BYTES,
+                                ) {
+                                    stream_bounded = true;
+                                    stream_interrupted = true;
+                                    warn!("AI reasoning exceeded XiaoAI's absolute output limit");
+                                    break 'streaming;
+                                }
+                            }
+
+                            let content_chunk =
+                                delta.get("content").and_then(Value::as_str).unwrap_or("");
+                            if content_chunk.is_empty() {
+                                continue;
+                            }
                             if !push_bounded(
-                                &mut accumulated_reasoning,
-                                reasoning_chunk,
-                                MAX_STREAM_REASONING_BYTES,
+                                &mut accumulated_raw,
+                                content_chunk,
+                                MAX_STREAM_VISIBLE_BYTES,
                             ) {
                                 stream_bounded = true;
                                 stream_interrupted = true;
-                                warn!("AI reasoning exceeded XiaoAI's absolute output limit");
+                                warn!("AI answer exceeded XiaoAI's absolute output limit");
                                 break 'streaming;
                             }
-                        }
 
-                        let content_chunk =
-                            delta.get("content").and_then(Value::as_str).unwrap_or("");
-                        if content_chunk.is_empty() {
-                            continue;
-                        }
-                        if !push_bounded(
-                            &mut accumulated_raw,
-                            content_chunk,
-                            MAX_STREAM_VISIBLE_BYTES,
-                        ) {
-                            stream_bounded = true;
-                            stream_interrupted = true;
-                            warn!("AI answer exceeded XiaoAI's absolute output limit");
-                            break 'streaming;
-                        }
+                            let visible_partial =
+                                if let Some(close_pos) = accumulated_raw.rfind("</think>") {
+                                    accumulated_raw[close_pos + "</think>".len()..].trim()
+                                } else if accumulated_raw.contains("<think>") {
+                                    ""
+                                } else {
+                                    accumulated_raw.trim()
+                                };
 
-                        let visible_partial =
-                            if let Some(close_pos) = accumulated_raw.rfind("</think>") {
-                                accumulated_raw[close_pos + "</think>".len()..].trim()
-                            } else if accumulated_raw.contains("<think>") {
-                                ""
-                            } else {
-                                accumulated_raw.trim()
-                            };
-
-                        if !visible_partial.is_empty() {
-                            if !has_started_answer {
-                                has_started_answer = true;
-                                if let Some(tl) = timeline {
-                                    tl.add_action("Writing", Some(ProgressActivity::Writing))
-                                        .await;
+                            if !visible_partial.is_empty() {
+                                if !has_started_answer {
+                                    has_started_answer = true;
+                                    if let Some(tl) = timeline {
+                                        tl.add_action("Writing", Some(ProgressActivity::Writing))
+                                            .await;
+                                    }
                                 }
-                            }
-                            if let Some(tl) = timeline {
-                                tl.set_partial_answer(visible_partial).await;
-                                tl.sync_draft(false).await;
+                                if let Some(tl) = timeline {
+                                    tl.set_partial_answer(visible_partial).await;
+                                    tl.sync_draft(false).await;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        if !stream_done && !cancelled && !stream_interrupted {
-            match decoder.finish() {
-                Ok(events) => {
-                    for event in events {
-                        if matches!(event, StreamEvent::Done) {
-                            stream_done = true;
+            if !stream_done && !cancelled && !stream_interrupted {
+                match decoder.finish() {
+                    Ok(events) => {
+                        for event in events {
+                            if matches!(event, StreamEvent::Done) {
+                                stream_done = true;
+                            }
+                        }
+                        if !stream_done {
+                            stream_interrupted = true;
                         }
                     }
-                    if !stream_done {
+                    Err(error) => {
+                        warn!("AI response SSE final decode failed: {error}");
                         stream_interrupted = true;
                     }
                 }
-                Err(error) => {
-                    warn!("AI response SSE final decode failed: {error}");
-                    stream_interrupted = true;
-                }
             }
+
+            if turn == 0 && !accumulated_tool_calls.is_empty() && !cancelled {
+                let mut tool_results = Vec::new();
+                for tc in accumulated_tool_calls.iter() {
+                    let name = tc.name.trim();
+                    let tool_id = if tc.id.is_empty() {
+                        "call_default".to_string()
+                    } else {
+                        tc.id.clone()
+                    };
+                    let result = if name == "web_search" {
+                        if let Some(tl) = timeline {
+                            tl.add_action("Searching", Some(ProgressActivity::Searching))
+                                .await;
+                            tl.sync_draft(false).await;
+                        }
+                        let parsed_query = serde_json::from_str::<Value>(&tc.arguments)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("query")
+                                    .and_then(Value::as_str)
+                                    .map(|s| s.to_string())
+                            })
+                            .unwrap_or_else(|| tc.arguments.clone());
+
+                        tokio::select! {
+                            changed = cancel_rx.changed() => {
+                                if changed.is_ok() && *cancel_rx.borrow() {
+                                    cancelled = true;
+                                }
+                                "Pencarian dibatalkan.".to_string()
+                            }
+                            res = crate::ai::tools::execute_web_search(&parsed_query) => res,
+                        }
+                    } else if name == "fetch_url" {
+                        if let Some(tl) = timeline {
+                            tl.add_action("Fetching", Some(ProgressActivity::Fetching))
+                                .await;
+                            tl.sync_draft(false).await;
+                        }
+                        let parsed_url = serde_json::from_str::<Value>(&tc.arguments)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("url")
+                                    .and_then(Value::as_str)
+                                    .map(|s| s.to_string())
+                            })
+                            .unwrap_or_else(|| tc.arguments.clone());
+
+                        tokio::select! {
+                            changed = cancel_rx.changed() => {
+                                if changed.is_ok() && *cancel_rx.borrow() {
+                                    cancelled = true;
+                                }
+                                "Pengambilan web dibatalkan.".to_string()
+                            }
+                            res = crate::ai::tools::fetch_web_content(&parsed_url) => {
+                                res.unwrap_or_else(|e| format!("Gagal membaca URL: {e}"))
+                            }
+                        }
+                    } else {
+                        format!("Tool '{name}' tidak didukung.")
+                    };
+                    tool_results.push((tool_id, name.to_string(), tc.arguments.clone(), result));
+                    if cancelled {
+                        break;
+                    }
+                }
+
+                if cancelled {
+                    break;
+                }
+
+                let tool_calls_json = tool_results
+                    .iter()
+                    .map(|(id, name, args, _)| {
+                        json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": args
+                            }
+                        })
+                    })
+                    .collect::<Vec<_>>();
+
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": tool_calls_json
+                }));
+
+                for (id, _, _, res) in &tool_results {
+                    messages.push(json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": res
+                    }));
+                }
+
+                messages.push(json!({
+                    "role": "user",
+                    "content": "Berdasarkan data dan ringkasan hasil pencarian web di atas, jawab pertanyaan awal pengguna secara lengkap dan jelas."
+                }));
+
+                payload["messages"] = json!(messages);
+                payload.as_object_mut().unwrap().remove("tools");
+
+                if let Some(tl) = timeline {
+                    tl.add_action("Writing", Some(ProgressActivity::Writing))
+                        .await;
+                    tl.set_partial_answer("Menyusun jawaban...").await;
+                    tl.sync_draft(false).await;
+                }
+
+                continue;
+            }
+
+            break;
         }
 
         // Post-process final output

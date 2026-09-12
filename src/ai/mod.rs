@@ -8,3 +8,4 @@ pub use service::AIChatService;
 
 pub mod provider;
 pub mod storage;
+pub mod tools;
