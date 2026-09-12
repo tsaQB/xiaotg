@@ -3,32 +3,6 @@
 version = 4
 
 [[package]]
-name = "XiaoAI"
-version = "0.3.0"
-dependencies = [
- "base64",
- "chrono",
- "crossterm",
- "dotenvy",
- "futures-util",
- "html-escape",
- "lopdf",
- "rand 0.8.8",
- "regex",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tokio-stream",
- "tracing",
- "tracing-subscriber",
- "url",
- "urlencoding",
- "zip",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2188,6 +2162,32 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "xiao"
+version = "0.3.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "crossterm",
+ "dotenvy",
+ "futures-util",
+ "html-escape",
+ "lopdf",
+ "rand 0.8.8",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "zip",
+]
 
 [[package]]
 name = "yoke"

@@ -1,6 +1,6 @@
 # Changelog
 
-## xiaochat v0.3.0 — 2026-08-30 — role-based multimodal routing & modern minimalist CLI
+## xiao v0.3.0 — 2026-08-30 — role-based multimodal routing & modern minimalist CLI
 
 ### Modern CLI Architecture
 - Streamline CLI commands into a clean, flat, single canonical set (`start`, `setup`, `status`, `gateway`, `provider`, `model`, `pick`, `addon`, `probe`, `help`).
@@ -88,7 +88,7 @@
 - Add native generation-stop flow using `can_stop`, `keep_on_stop`, and `stopped_message_generation`.
 - Add cancellation registry keyed by chat/draft ID.
 - Add disabled inline buttons and Rich Message buttons.
-- Add expandable quotation, document block, compact table, `force_reply`, and ephemeral parameter models used by XiaoAI.
+- Add expandable quotation, document block, compact table, `force_reply`, and ephemeral parameter models used by xiao.
 - Stream partial answer text into Telegram drafts.
 - Update runtime/version wording to Bot API 10.3 without claiming full API coverage.
 

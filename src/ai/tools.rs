@@ -455,7 +455,7 @@ async fn search_wikipedia(client: &reqwest::Client, query: &str) -> Result<Strin
 
     let resp = client
         .get(&url)
-        .header(USER_AGENT, "XiaoAI/0.3.0 (Telegram Bot Assistant)")
+        .header(USER_AGENT, "xiao/0.3.0 (Telegram Bot Assistant)")
         .send()
         .await
         .map_err(|e| format!("Gagal menghubungi Wikipedia: {e}"))?;
@@ -517,7 +517,7 @@ pub async fn fetch_web_content(url: &str) -> Result<String, String> {
 
     let resp = client
         .get(u)
-        .header(USER_AGENT, "XiaoAI/0.3.0 (Telegram Bot Assistant)")
+        .header(USER_AGENT, "xiao/0.3.0 (Telegram Bot Assistant)")
         .header(
             ACCEPT,
             "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
@@ -556,7 +556,7 @@ pub async fn fetch_web_content(url: &str) -> Result<String, String> {
     if cleaned.len() > max_len {
         let truncated: String = cleaned.chars().take(max_len).collect();
         Ok(format!(
-            "{}\n\n[...Konten web dipotong karena melebihi batas panjang teks XiaoAI...]",
+            "{}\n\n[...Konten web dipotong karena melebihi batas panjang teks xiao...]",
             truncated
         ))
     } else {

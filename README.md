@@ -1,8 +1,8 @@
-# xiaochat
+# xiao
 
-xiaochat adalah bot Telegram asynchronous berbasis Rust untuk endpoint AI yang kompatibel dengan OpenAI. xiaochat v0.3.0 menambahkan **role-based multimodal model routing, observable capability discovery, model-aware image generation, dan native Rich command UI Telegram 10.3** di atas hardening session/security 0.2.0.
+xiao adalah bot Telegram asynchronous berbasis Rust untuk endpoint AI yang kompatibel dengan OpenAI. xiao v0.3.0 menambahkan **role-based multimodal model routing, observable capability discovery, model-aware image generation, dan native Rich command UI Telegram 10.3** di atas hardening session/security 0.2.0.
 
-> XiaoAI tidak mengklaim mengimplementasikan seluruh Telegram Bot API. Client hanya memodelkan method dan update yang dibutuhkan aplikasi.
+> xiao tidak mengklaim mengimplementasikan seluruh Telegram Bot API. Client hanya memodelkan method dan update yang dibutuhkan aplikasi.
 
 ## Fitur Utama
 
@@ -13,7 +13,7 @@ xiaochat adalah bot Telegram asynchronous berbasis Rust untuk endpoint AI yang k
 - Session persisten di SQLite dengan stable `session_id`, monotonic ID allocation, dan durable `revision`/generation epoch. Rename/clear/remove/switch/append mempublikasikan perubahan ke RAM hanya setelah transaksi SQLite berhasil.
 - Telegram update masuk ke durable inbox, lalu diklasifikasikan ke **control lane** atau **generation lane**. Generation owner tetap diserialisasi, control lane tetap responsif, dan native Stop membypass kedua queue untuk cancellation segera.
 - Provider OpenAI-compatible, discovery model `/models`, STT `/audio/transcriptions`, SSE chat completion, dan image generation.
-- Owner-only authorization melalui `OWNER_USER_ID`; `ALLOWED_CHAT_IDS` hanya mengatur chat tambahan tempat owner boleh menggunakan XiaoAI.
+- Owner-only authorization melalui `OWNER_USER_ID`; `ALLOWED_CHAT_IDS` hanya mengatur chat tambahan tempat owner boleh menggunakan xiao.
 - Batas download media dan fallback image eksternal yang default-nya nonaktif.
 - Unicode-safe truncation/prefix handling serta HTML escaping untuk data dinamis yang masuk ke `parse_mode=HTML`.
 
@@ -34,12 +34,12 @@ Jika specialist berbeda provider/model, Xiao mengirim media + pertanyaan saat in
 
 ## Telegram Bot API 10.3 yang Digunakan
 
-xiaochat v0.3.0 memakai subset Telegram Bot API 10.3 yang relevan untuk UI/AI flow:
+xiao v0.3.0 memakai subset Telegram Bot API 10.3 yang relevan untuk UI/AI flow:
 
 - `can_stop` dan `keep_on_stop` pada streaming draft.
 - update `stopped_message_generation` / `MessageGenerationStopped`.
 - `DisabledButton` pada inline keyboard.
-- `force_reply` pada keyboard markup yang dimodelkan XiaoAI.
+- `force_reply` pada keyboard markup yang dimodelkan xiao.
 - `RichMessageButton`, `RichBlockButtons`, dan style button.
 - `RichBlockExpandableBlockQuotation`.
 - `RichBlockDocument`.
@@ -50,7 +50,7 @@ xiaochat v0.3.0 memakai subset Telegram Bot API 10.3 yang relevan untuk UI/AI fl
 
 ### Owner wajib
 
-`OWNER_USER_ID` adalah hard invariant. XiaoAI menolak start jika owner belum dikonfigurasi.
+`OWNER_USER_ID` adalah hard invariant. xiao menolak start jika owner belum dikonfigurasi.
 
 ```bash
 xiao gateway
@@ -100,7 +100,7 @@ Mengaktifkannya berarti prompt image dapat dikirim ke provider eksternal tersebu
 ## Struktur Direktori
 
 ```text
-XiaoAI/
+xiao/
 ├── Cargo.toml
 ├── src/
 │   ├── main.rs           # access policy, durable inbox router, control/generation lanes, Telegram UI
@@ -110,7 +110,7 @@ XiaoAI/
 │   ├── util.rs           # Unicode/HTML safety helpers
 │   ├── bot/
 │   │   ├── mod.rs
-│   │   ├── client.rs     # Telegram HTTP client + Bot API 10.3 surface used by XiaoAI
+│   │   ├── client.rs     # Telegram HTTP client + Bot API 10.3 surface used by xiao
 │   │   └── models.rs     # Telegram/Rich Message serde models
 │   ├── ai/
 │   │   ├── capability.rs # capability heuristics/metadata projection
@@ -168,7 +168,7 @@ IMAGE_GENERATION_TIMEOUT_SECS=120
 IMAGE_DOWNLOAD_TIMEOUT_SECS=30
 ```
 
-`AI_ENDPOINT` dan `AI_API_KEY` dipakai untuk subset protokol OpenAI-compatible yang didukung XiaoAI (`/chat/completions`, `/audio/transcriptions`, dan `/images/generations`); ini bukan klaim dukungan untuk semua protokol/provider OpenAI-compatible.
+`AI_ENDPOINT` dan `AI_API_KEY` dipakai untuk subset protokol OpenAI-compatible yang didukung xiao (`/chat/completions`, `/audio/transcriptions`, dan `/images/generations`); ini bukan klaim dukungan untuk semua protokol/provider OpenAI-compatible.
 
 `AI_PROVIDER_CONNECT_TIMEOUT_SECS` mengatur connect timeout umum traffic AI. `IMAGE_GENERATION_TIMEOUT_SECS` dan `IMAGE_DOWNLOAD_TIMEOUT_SECS` hanya mengatur operasi image; `IMAGE_PROVIDER_CONNECT_TIMEOUT_SECS` dipertahankan sebagai knob khusus koneksi download image agar konfigurasi lama tetap aman.
 
@@ -197,7 +197,7 @@ chmod +x "$PREFIX/bin/xiao"
 | Perintah / aksi | Deskripsi |
 | --- | --- |
 | Kirim pesan | Chat dengan model aktif |
-| Kirim image/audio/video/text document | Multimodal sesuai dukungan provider dan batas XiaoAI |
+| Kirim image/audio/video/text document | Multimodal sesuai dukungan provider dan batas xiao |
 | `/start` | Menu sambutan dan status model |
 | `/menu` | Menu navigasi |
 | `/model` | Pilih model dari whitelist |

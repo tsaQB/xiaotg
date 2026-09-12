@@ -1,7 +1,7 @@
-# GOAL: XiaoAI CLI Simplification & Modernization
+# GOAL: xiao CLI Simplification & Modernization
 
 ## 🎯 Objective
-Sederhanakan seluruh arsitektur antarmuka baris perintah (CLI) XiaoAI agar memiliki satu perintah baku (*Single Canonical Command*), hirarki rata (*flat hierarchy*), dan berbasis antarmuka visual terminal interaktif (*Full Interactive TUI First*). Menghilangkan sub-command bertingkat yang rumit, menghapus log mentah / ASCII clutter, dan menyajikan output minimalis, keren, singkat, dan mudah dibaca.
+Sederhanakan seluruh arsitektur antarmuka baris perintah (CLI) xiao agar memiliki satu perintah baku (*Single Canonical Command*), hirarki rata (*flat hierarchy*), dan berbasis antarmuka visual terminal interaktif (*Full Interactive TUI First*). Menghilangkan sub-command bertingkat yang rumit, menghapus log mentah / ASCII clutter, dan menyajikan output minimalis, keren, singkat, dan mudah dibaca.
 
 ---
 

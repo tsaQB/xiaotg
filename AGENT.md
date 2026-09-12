@@ -1,6 +1,6 @@
-# XiaoAI — Agent Guide
+# xiao — Agent Guide
 
-Petunjuk dan arsitektur XiaoAI telah diselaraskan dengan spesifikasi CLI modern v0.3.0. Rujukan lengkap dapat dilihat di [AGENTS.md](./AGENTS.md) dan [GOAL.md](./GOAL.md).
+Petunjuk dan arsitektur xiao telah diselaraskan dengan spesifikasi CLI modern v0.3.0. Rujukan lengkap dapat dilihat di [AGENTS.md](./AGENTS.md) dan [GOAL.md](./GOAL.md).
 
 ## Canonical Commands
 - `xiao start`

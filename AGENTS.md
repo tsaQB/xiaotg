@@ -1,6 +1,6 @@
-# xiaochat — Rust Telegram AI Assistant
+# xiao — Rust Telegram AI Assistant
 
-XiaoAI is a standalone asynchronous Rust application using the **Telegram Bot API 10.3 subset required by XiaoAI**, Rich Message AST formatting, cancellable streaming drafts, SQLite sessions, and multi-provider OpenAI-compatible AI routing. Do not describe the client as a full Bot API implementation.
+xiao is a standalone asynchronous Rust application using the **Telegram Bot API 10.3 subset required by xiao**, Rich Message AST formatting, cancellable streaming drafts, SQLite sessions, and multi-provider OpenAI-compatible AI routing. Do not describe the client as a full Bot API implementation.
 
 ## Required Quality Gates
 
@@ -28,7 +28,7 @@ Run before declaring a change ready:
 
 ## Security & Session Invariants
 
-1. `OWNER_USER_ID` is required. Only that Telegram user may operate XiaoAI; `ALLOWED_CHAT_IDS` extends where the owner may use the bot, not who may use it.
+1. `OWNER_USER_ID` is required. Only that Telegram user may operate xiao; `ALLOWED_CHAT_IDS` extends where the owner may use the bot, not who may use it.
 2. Never log a URL that contains `BOT_TOKEN`.
 3. Session identity is the stable SQLite `session_id`, never a vector/list index.
 4. New session IDs must come from the persistent high-water sequence and must not reuse deleted IDs.
@@ -58,7 +58,7 @@ src/
 ├── attachments.rs  # per-session multimodal persistence
 ├── util.rs         # Unicode-safe truncation and HTML escaping
 ├── bot/
-│   ├── client.rs   # Telegram HTTP client + 10.3 methods used by XiaoAI
+│   ├── client.rs   # Telegram HTTP client + 10.3 methods used by xiao
 │   └── models.rs   # Telegram/Rich Message serde models
 ├── ai/
 │   ├── provider.rs # single-owner provider state + capability probes

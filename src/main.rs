@@ -120,9 +120,13 @@ fn get_config_path() -> std::path::PathBuf {
         if home_env.exists() {
             return home_env;
         }
-        let app_dir_env = Path::new(&home).join("XiaoAI").join(".env");
+        let app_dir_env = Path::new(&home).join("xiao").join(".env");
         if app_dir_env.exists() {
             return app_dir_env;
+        }
+        let legacy_app_dir_env = Path::new(&home).join("XiaoAI").join(".env");
+        if legacy_app_dir_env.exists() {
+            return legacy_app_dir_env;
         }
     }
     Path::new(".env").to_path_buf()
@@ -640,7 +644,7 @@ async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMe
 
     InputRichMessage::new(vec![
         RichBlock::SectionHeading {
-            text: Value::String("XiaoAI".to_string()),
+            text: Value::String("xiao".to_string()),
             level: 1,
         },
         RichBlock::Paragraph {
@@ -4139,7 +4143,7 @@ async fn main() {
                 return;
             };
             println!(
-                "\n🚀 XiaoAI @{} online menggunakan Telegram Bot API 10.3!",
+                "\n🚀 xiao @{} online menggunakan Telegram Bot API 10.3!",
                 bot_info.username.unwrap_or_default()
             );
             println!("⚡ Streaming Timeline + Native Stop Active!");

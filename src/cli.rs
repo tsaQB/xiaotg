@@ -320,7 +320,7 @@ pub fn terminal_interactive_multi_select(
 }
 
 pub(crate) async fn run_cli_quickstart_wizard(ai_service: &AIChatService) -> Option<String> {
-    println!("\n\x1b[1;36mXiaoAI Setup Wizard\x1b[0m");
+    println!("\n\x1b[1;36mxiao Setup Wizard\x1b[0m");
     println!(
         "\x1b[38;5;244mKonfigurasi awal AI Provider dan Gateway. Tekan Ctrl+C untuk batal.\x1b[0m"
     );
@@ -582,7 +582,7 @@ pub(crate) async fn get_or_prompt_token(ai_service: &AIChatService) -> Option<St
 
 pub(crate) async fn run_cli_status(ai_service: &AIChatService) {
     load_environment();
-    println!("\n\x1b[1;36mXiaoAI Status\x1b[0m\n");
+    println!("\n\x1b[1;36mxiao Status\x1b[0m\n");
 
     let token = env::var("BOT_TOKEN")
         .ok()
@@ -2144,7 +2144,7 @@ async fn run_persisted_capability_probe(
 }
 
 pub(crate) fn print_cli_help() {
-    println!("\n\x1b[1;36mXiaoAI v0.3.0 — AI Assistant Bot\x1b[0m\n");
+    println!("\n\x1b[1;36mxiao v0.3.0 — AI Assistant Bot\x1b[0m\n");
     println!("\x1b[1;37mPenggunaan:\x1b[0m");
     println!("  xiao <command>\n");
     println!("\x1b[1;37mDaftar Perintah:\x1b[0m");
