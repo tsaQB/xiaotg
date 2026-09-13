@@ -23,7 +23,7 @@ use ai::service::{GenerationModelSnapshot, ImageGenerationErrorKind, ProbeEvent,
 use ai::AIChatService;
 use bot::client::{TelegramBotClient, TelegramDeliveryContext};
 use bot::models::{
-    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage, ReplyKeyboardMarkup,
+    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage, ReplyKeyboardRemove,
     RichBlock, RichBlockListItem, RichBlockTableCell, RichMessageButton, Update,
 };
 use parser::build_full_rich_message;
@@ -169,14 +169,12 @@ pub(crate) fn get_configured_token() -> Option<String> {
 use cli::*;
 
 fn get_main_menu_keyboard() -> Value {
-    serde_json::to_value(ReplyKeyboardMarkup::from_strings(
-        vec![vec!["ɴᴇᴡ", "ᴍᴏᴅᴇʟ", "ᴄᴏɴᴛᴇxᴛ"]],
-        false,
-        true,
-        Some("Tanya AI atau pilih menu..."),
-    ))
+    serde_json::to_value(ReplyKeyboardRemove {
+        remove_keyboard: true,
+        selective: None,
+    })
     .unwrap_or_else(|error| {
-        error!("Failed to serialize main menu keyboard: {error}");
+        error!("Failed to serialize ReplyKeyboardRemove: {error}");
         json!({})
     })
 }
@@ -425,6 +423,7 @@ fn truncate_session_name(name: &str, max_chars: usize) -> String {
     format!("{truncated}...")
 }
 
+#[allow(dead_code)]
 fn session_last_activity(session: &ai::service::ChatSession) -> String {
     let last_message = session.messages.last();
     let Some(message) = last_message else {
@@ -439,6 +438,7 @@ fn session_last_activity(session: &ai::service::ChatSession) -> String {
     }
 }
 
+#[allow(dead_code)]
 async fn build_session_manager_ui(
     ai_service: &AIChatService,
     user_id: i64,
@@ -564,15 +564,13 @@ async fn build_session_manager_ui(
         align: Some("center".to_string()),
     });
     blocks.push(RichBlock::Buttons {
-        buttons: vec![
-            RichMessageButton::callback("Context", "open_context"),
-            RichMessageButton::callback("Close", "session_close"),
-        ],
+        buttons: vec![RichMessageButton::callback("Close", "session_close")],
         align: Some("center".to_string()),
     });
     InputRichMessage::new(blocks)
 }
 
+#[allow(dead_code)]
 async fn send_or_update_session_manager(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
@@ -682,29 +680,18 @@ async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMe
         RichBlock::BlockQuotation {
             blocks: vec![json!({
                 "type":"paragraph",
-                "text":"Kirim teks, gambar, dokumen, video, atau voice note untuk mulai berbicara dengan Xiao."
+                "text":"Kirim teks, gambar, dokumen, video, atau voice note untuk mulai mengobrol.\n\nPerintah bantuan:\n• /clear — Reset riwayat obrolan\n• /new — Mulai sesi baru\n• /help — Panduan perintah"
             })],
         },
-        RichBlock::Buttons {
-            buttons: vec![
-                RichMessageButton::callback_styled("New Chat", "session_new", "primary"),
-                RichMessageButton::callback("Model", "model_dashboard"),
-            ],
-            align: Some("center".to_string()),
-        },
-        RichBlock::Buttons {
-            buttons: vec![
-                RichMessageButton::callback("Session", "open_session"),
-                RichMessageButton::callback("Context", "open_context"),
-            ],
-            align: Some("center".to_string()),
-        },
         RichBlock::Paragraph {
-            text: Value::String("Addon Models dan provider dikelola melalui Xiao CLI.".to_string()),
+            text: Value::String(
+                "Model AI dan status sistem dikelola melalui Xiao CLI.".to_string(),
+            ),
         },
     ])
 }
 
+#[allow(dead_code)]
 async fn build_menu_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMessage {
     let main = ai_service
         .resolve_model_route_unchecked(ai::service::ModelRole::Main)
@@ -752,13 +739,6 @@ async fn build_menu_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMes
         },
         RichBlock::Buttons {
             buttons: vec![
-                RichMessageButton::callback("Model", "model_dashboard"),
-                RichMessageButton::callback("Context", "open_context"),
-            ],
-            align: Some("center".to_string()),
-        },
-        RichBlock::Buttons {
-            buttons: vec![
                 RichMessageButton::callback("Generate Image", "img_new"),
                 RichMessageButton::callback("Help", "action_help"),
             ],
@@ -773,7 +753,7 @@ fn build_help_ui() -> InputRichMessage {
             json!({"type":"paragraph","text":"Text — ordinary chat and instructions."}),
         ]),
         RichBlockListItem::bullet(vec![
-            json!({"type":"paragraph","text":"Images — routed through the verified Vision role."}),
+            json!({"type":"paragraph","text":"Images: routed through the configured Vision role, without a prerequisite probe."}),
         ]),
         RichBlockListItem::bullet(vec![
             json!({"type":"paragraph","text":"Documents — local extraction; scanned PDF pages route through Vision."}),
@@ -782,7 +762,7 @@ fn build_help_ui() -> InputRichMessage {
             json!({"type":"paragraph","text":"Voice/audio — native Main audio or the configured Audio STT role."}),
         ]),
         RichBlockListItem::bullet(vec![
-            json!({"type":"paragraph","text":"Video — direct Main or the configured Video specialist when verified."}),
+            json!({"type":"paragraph","text":"Video: direct Main or the configured Video specialist, without a prerequisite probe."}),
         ]),
     ];
     let command_rows = vec![
@@ -791,32 +771,16 @@ fn build_help_ui() -> InputRichMessage {
             RichBlockTableCell::text_only("Action", true, Some("left")),
         ],
         vec![
-            RichBlockTableCell::text_only("/menu", false, Some("left")),
-            RichBlockTableCell::text_only("Open main menu", false, Some("left")),
+            RichBlockTableCell::text_only("/clear", false, Some("left")),
+            RichBlockTableCell::text_only("Reset active chat history", false, Some("left")),
         ],
         vec![
             RichBlockTableCell::text_only("/new", false, Some("left")),
-            RichBlockTableCell::text_only("Create a new session", false, Some("left")),
-        ],
-        vec![
-            RichBlockTableCell::text_only("/session", false, Some("left")),
-            RichBlockTableCell::text_only("Manage sessions", false, Some("left")),
-        ],
-        vec![
-            RichBlockTableCell::text_only("/clear", false, Some("left")),
-            RichBlockTableCell::text_only("Reset active history", false, Some("left")),
-        ],
-        vec![
-            RichBlockTableCell::text_only("/model", false, Some("left")),
-            RichBlockTableCell::text_only("Main Model dashboard/search", false, Some("left")),
-        ],
-        vec![
-            RichBlockTableCell::text_only("/context", false, Some("left")),
-            RichBlockTableCell::text_only("Canonical context status", false, Some("left")),
+            RichBlockTableCell::text_only("Start a new chat session", false, Some("left")),
         ],
         vec![
             RichBlockTableCell::text_only("/image", false, Some("left")),
-            RichBlockTableCell::text_only("Generate an image", false, Some("left")),
+            RichBlockTableCell::text_only("Generate an image from text", false, Some("left")),
         ],
         vec![
             RichBlockTableCell::text_only("/help", false, Some("left")),
@@ -844,7 +808,7 @@ fn build_help_ui() -> InputRichMessage {
             summary: Value::String("Model Routing".to_string()),
             blocks: vec![json!({
                 "type":"paragraph",
-                "text":"Telegram can change Main Model. Vision, Video, Audio STT, and Image Generation routes are read-only here."
+                "text":"All model routing and specialist routes are managed via Xiao CLI. Vision, Video, Audio STT, and Image Generation routes are read-only in Telegram (configure via xiao addon)."
             })],
             is_open: Some(false),
         },
@@ -858,10 +822,6 @@ fn build_help_ui() -> InputRichMessage {
         },
         RichBlock::Paragraph {
             text: Value::String("Advanced routing configuration: xiao addon".to_string()),
-        },
-        RichBlock::Buttons {
-            buttons: vec![RichMessageButton::callback("Menu", "action_menu")],
-            align: Some("center".to_string()),
         },
     ])
 }
@@ -887,10 +847,12 @@ fn specialist_context_policy(
     }
 }
 
+#[allow(dead_code)]
 fn context_available_tokens(limit: usize, used: usize) -> usize {
     limit.saturating_sub(used)
 }
 
+#[allow(dead_code)]
 fn main_context_overflow_warning(model: &str, used: usize, usable_limit: usize) -> Option<String> {
     (used > usable_limit).then(|| {
         format!(
@@ -1046,7 +1008,7 @@ async fn run_observable_main_capability_probe(
         },
         RichBlock::Paragraph {
             text: Value::String(
-                "Unknown or stale capabilities remain fail-closed until safely verified."
+                "Capability evidence is diagnostic only. Configured routes can be used without probing."
                     .to_string(),
             ),
         },
@@ -1054,6 +1016,7 @@ async fn run_observable_main_capability_probe(
     let _ = bot.send_rich_message(chat_id, &completed, None, None).await;
 }
 
+#[allow(dead_code)]
 async fn build_model_dashboard_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMessage {
     let providers = ai_service.get_user_providers(user_id).await;
     let routing = ai_service.model_routing_config().await;
@@ -1069,7 +1032,7 @@ async fn build_model_dashboard_ui(ai_service: &AIChatService, user_id: i64) -> I
             .await
             .is_ok()
         {
-            "Verified"
+            "Configured"
         } else {
             "Unavailable"
         };
@@ -1126,7 +1089,7 @@ async fn build_model_dashboard_ui(ai_service: &AIChatService, user_id: i64) -> I
             }
         };
         let route_health = match ai_service.resolve_model_route(role).await {
-            Ok(_) => "Verified",
+            Ok(_) => "Configured",
             Err(error) if error.contains("Disabled") => "Disabled",
             Err(_) => "Unavailable",
         };
@@ -1215,6 +1178,7 @@ async fn build_model_dashboard_ui(ai_service: &AIChatService, user_id: i64) -> I
     ])
 }
 
+#[allow(dead_code)]
 async fn build_main_model_picker_rich(
     ai_service: &AIChatService,
     user_id: i64,
@@ -1328,6 +1292,7 @@ async fn build_main_model_picker_rich(
     InputRichMessage::new(blocks)
 }
 
+#[allow(dead_code)]
 async fn send_model_dashboard(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
@@ -1369,6 +1334,7 @@ fn build_clear_confirmation_ui() -> InputRichMessage {
     ])
 }
 
+#[allow(dead_code)]
 async fn build_context_monitor_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMessage {
     let stats = ai_service.get_context_stats(user_id).await;
     let main = ai_service
@@ -1540,7 +1506,7 @@ async fn build_context_monitor_ui(ai_service: &AIChatService, user_id: i64) -> I
             blocks: vec![json!({
                 "type":"paragraph",
                 "text": if provider_context.is_empty() {
-                    "No Specific cross-provider addon is active. Main Model routes execute directly when verified. Context windows are never added together.".to_string()
+                    "No Specific cross-provider addon is active. Configured Main Model routes execute directly without probing. Context windows are never added together.".to_string()
                 } else {
                     format!(
                         "{}\n\nContext windows are never added together.",
@@ -1560,6 +1526,7 @@ async fn build_context_monitor_ui(ai_service: &AIChatService, user_id: i64) -> I
     ])
 }
 
+#[allow(dead_code)]
 async fn send_or_update_context_monitor(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
@@ -1590,6 +1557,7 @@ async fn send_welcome(
     let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
 }
 
+#[allow(dead_code)]
 async fn send_menu(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
@@ -2033,10 +2001,7 @@ async fn handle_image_generation(
                         text: Value::String("Image generation was cancelled.".to_string()),
                     },
                     RichBlock::Buttons {
-                        buttons: vec![
-                            RichMessageButton::callback("New Image", "img_new"),
-                            RichMessageButton::callback("Menu", "action_menu"),
-                        ],
+                        buttons: vec![RichMessageButton::callback("New Image", "img_new")],
                         align: Some("center".to_string()),
                     },
                 ]);
@@ -2110,7 +2075,6 @@ async fn handle_image_generation(
                 buttons: vec![
                     RichMessageButton::callback_styled("Retry", "img_regen", "primary"),
                     RichMessageButton::callback("New Image", "img_new"),
-                    RichMessageButton::callback("Menu", "action_menu"),
                 ],
                 align: Some("center".to_string()),
             });
@@ -2135,14 +2099,9 @@ async fn handle_image_generation(
         InlineKeyboardButton::callback("🫟 Gambar Baru", "img_new"),
     ]];
     if !clean_prompt.is_empty() && clean_prompt.chars().count() <= 256 {
-        img_kb_rows.push(vec![
-            InlineKeyboardButton::copy("📋 Salin Prompt", &clean_prompt),
-            InlineKeyboardButton::callback("📱 Buka Menu", "action_menu"),
-        ]);
-    } else {
-        img_kb_rows.push(vec![InlineKeyboardButton::callback(
-            "📱 Buka Menu",
-            "action_menu",
+        img_kb_rows.push(vec![InlineKeyboardButton::copy(
+            "📋 Salin Prompt",
+            &clean_prompt,
         )]);
     }
     let img_kb = InlineKeyboardMarkup::new(img_kb_rows);
@@ -2288,14 +2247,6 @@ async fn handle_ai_chat(
     timeline.start_ticker();
     let _ = bot.send_chat_action(chat_id, "typing").await;
 
-    let current_model = if let Some(snapshot) = model_snapshot {
-        AIChatService::resolve_model_route_from_snapshot(snapshot, ai::service::ModelRole::Main)
-            .map(|route| route.model)
-            .unwrap_or_else(|_| "unavailable".to_string())
-    } else {
-        ai_service.get_user_model(user_id).await
-    };
-
     let generation_input = ai::service::GenerationInput {
         prompt: user_prompt,
         canonical_prompt: None,
@@ -2312,6 +2263,7 @@ async fn handle_ai_chat(
         video_mime,
         video_duration,
     };
+    let generation_start = std::time::Instant::now();
     let (_thinking, mut answer_text, _cancelled) = if let Some(snapshot) = model_snapshot {
         ai_service
             .generate_response_with_snapshot(user_id, generation_input, snapshot, &mut cancel_rx)
@@ -2324,12 +2276,21 @@ async fn handle_ai_chat(
 
     ai_service.end_generation(chat_id, draft_id).await;
     timeline.stop_ticker();
+    let elapsed_secs = generation_start.elapsed().as_secs_f64();
+    let emoji = if elapsed_secs <= 10.0 {
+        "⚡"
+    } else if elapsed_secs <= 30.0 {
+        "⏱️"
+    } else {
+        "🧠"
+    };
+    let elapsed = format!("`{emoji} {:.1}s`", elapsed_secs);
 
     if answer_text.trim().is_empty() {
         answer_text = "Maaf, respon AI kosong untuk permintaan ini.".to_string();
     }
 
-    let full_rich_msg = build_full_rich_message(&answer_text, Some(&current_model));
+    let full_rich_msg = build_full_rich_message(&answer_text, Some(&elapsed));
     let res = bot
         .send_rich_message(
             chat_id,
@@ -2437,62 +2398,19 @@ fn is_control_message_text(text: &str) -> bool {
         return true;
     }
 
-    if text.chars().all(|character| character.is_ascii_digit())
-        || text.starts_with("✅")
-        || text.starts_with("Session ")
-        || (text.starts_with("Hal") && text.chars().any(|character| character.is_ascii_digit()))
-    {
-        return true;
-    }
-
     [
         "📱 Menu",
         "Menu",
-        "🔙 Menu Utama",
-        "🔙 Kembali ke Menu Utama",
-        "Menu Utama",
+        "menu",
         "Main Menu",
         "main menu",
-        "Main menu",
-        "ɴᴇᴡ",
-        "➕ ɴᴇᴡ",
-        "➕ New",
         "New",
         "new",
-        "➕ Chat Baru",
         "Chat Baru",
-        "📑 Session",
         "Session",
         "session",
-        "📑 Session Manager",
-        "📑 Lihat Daftar Session",
-        "🗑️ Hapus Session",
-        "🗑️ Remove Session",
-        "Delete",
-        "delete",
-        "Delete Session",
-        "✏️ Rename Session",
-        "✏️ Ubah Nama Session",
-        "Rename",
-        "rename",
-        "Rename Session",
-        "ᴄᴏɴᴛᴇxᴛ",
-        "🧠 ᴄᴏɴᴛᴇxᴛ",
-        "🧠 Context",
-        "Context",
-        "context",
-        "🧠 Info Konteks",
-        "Info Konteks",
-        "ᴍᴏᴅᴇʟ",
-        "⚙️ ᴍᴏᴅᴇʟ",
-        "⚙️ Model",
-        "Model",
-        "model",
-        "⚙️ Model AI",
-        "Pilih Model",
-        "🗑️ Reset Chat",
-        "🗑️ Reset Obrolan",
-        "❓ Help",
+        "Clear",
+        "clear",
         "Help",
         "help",
         "Bantuan",
@@ -3129,18 +3047,18 @@ async fn handle_update(
         ]
         .contains(&text.as_str())
         {
-            send_menu(bot, ai_service, chat_id, user_id).await;
+            let _ = bot
+                .send_message(
+                    chat_id,
+                    "ℹ️ <b>Antarmuka Chat Bersih:</b> Menu tombol telah ditiadakan. Anda dapat langsung mengirim pesan teks atau media untuk mengobrol.\n\nPerintah cepat:\n• <code>/clear</code> — Reset riwayat chat\n• <code>/new</code> — Sesi baru\n• <code>/help</code> — Bantuan",
+                    Some("HTML"),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
         } else if command_matches(&text, "/new")
-            || [
-                "ɴᴇᴡ",
-                "➕ ɴᴇᴡ",
-                "➕ New",
-                "New",
-                "new",
-                "➕ Chat Baru",
-                "Chat Baru",
-            ]
-            .contains(&text.as_str())
+            || ["New", "new", "➕ Chat Baru", "Chat Baru"].contains(&text.as_str())
         {
             let Some(new_session) = ai_service.create_new_session(user_id, None).await else {
                 let rich = InputRichMessage::new(vec![
@@ -3158,8 +3076,6 @@ async fn handle_update(
                 let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
                 return;
             };
-            let total_sessions = ai_service.get_sessions(user_id).await.len();
-            let target_page = total_sessions.saturating_sub(1) / 5 + 1;
             let rich = InputRichMessage::new(vec![
                 RichBlock::SectionHeading {
                     text: Value::String("NEW SESSION".to_string()),
@@ -3172,174 +3088,23 @@ async fn handle_update(
                     )),
                 },
                 RichBlock::Paragraph {
-                    text: Value::String(format!(
-                        "{}\nCanonical history is empty.",
-                        new_session.name
-                    )),
+                    text: Value::String("Canonical history is empty.".to_string()),
                 },
             ]);
             let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-            send_or_update_session_manager(bot, ai_service, chat_id, user_id, None, target_page)
-                .await;
         } else if command_matches(&text, "/session")
-            || [
-                "📑 Session",
-                "Session",
-                "session",
-                "📑 Session Manager",
-                "📑 Lihat Daftar Session",
-            ]
-            .contains(&text.as_str())
+            || ["Session", "session"].contains(&text.as_str())
         {
-            let active_idx = ai_service.get_active_session_index(user_id).await;
-            let target_page = (active_idx / 5) + 1;
-            send_or_update_session_manager(bot, ai_service, chat_id, user_id, None, target_page)
-                .await;
-        } else if [
-            "🗑️ Hapus Session",
-            "🗑️ Remove Session",
-            "Delete",
-            "delete",
-            "Delete Session",
-        ]
-        .contains(&text.as_str())
-        {
-            let active_idx = ai_service.get_active_session_index(user_id).await;
-            let removed = ai_service.remove_session(user_id, active_idx).await;
-            let new_active_idx = ai_service.get_active_session_index(user_id).await;
-            let target_page = (new_active_idx / 5) + 1;
-            let notice = if removed {
-                "🗑️ <b>Session berhasil dihapus!</b>"
-            } else {
-                "⚠️ <b>Session tidak dihapus.</b> Penyimpanan gagal; session lama tetap utuh."
-            };
-            let _ = bot
-                .send_message(chat_id, notice, Some("HTML"), None, None, None)
-                .await;
-            send_or_update_session_manager(bot, ai_service, chat_id, user_id, None, target_page)
-                .await;
-        } else if [
-            "✏️ Rename Session",
-            "✏️ Ubah Nama Session",
-            "Rename",
-            "rename",
-            "Rename Session",
-        ]
-        .contains(&text.as_str())
-        {
-            let active_idx = ai_service.get_active_session_index(user_id).await;
-            let Some(active_session_id) = ai_service.get_active_session_id(user_id).await else {
-                let _ = bot
-                    .send_message(
-                        chat_id,
-                        "⚠️ Session aktif tidak tersedia karena storage gagal diakses.",
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                return;
-            };
-            ai_service
-                .user_waiting_rename
-                .write()
-                .await
-                .insert(user_id, active_session_id);
             let _ = bot
                 .send_message(
                     chat_id,
-                    &format!(
-                        "✏️ <b>Ketikkan nama baru untuk Session #{}:</b>",
-                        active_idx + 1
-                    ),
+                    "ℹ️ <b>Sesi Percakapan:</b> Gunakan <code>/new</code> untuk membuat sesi baru atau <code>/clear</code> untuk mereset riwayat sesi aktif.\nManajemen multi-sesi lengkap dikelola melalui database/CLI.",
                     Some("HTML"),
                     None,
                     None,
                     None,
                 )
                 .await;
-        } else if let Some(caps) = Regex::new(r"(?i)Hal(?:aman)?\s*([0-9]+)")
-            .ok()
-            .and_then(|regex| regex.captures(&text))
-        {
-            if ["Hal", "▶", "◀"].iter().any(|k| text.contains(k)) {
-                let target_page: usize = caps
-                    .get(1)
-                    .and_then(|m| m.as_str().parse().ok())
-                    .unwrap_or(1);
-                send_or_update_session_manager(
-                    bot,
-                    ai_service,
-                    chat_id,
-                    user_id,
-                    None,
-                    target_page,
-                )
-                .await;
-            }
-        } else if let Some(caps) = Regex::new(r"^(?:✅\s*|Session\s*)?([0-9]+)$")
-            .ok()
-            .and_then(|regex| regex.captures(text.trim()))
-        {
-            if text.trim().chars().all(|c| c.is_ascii_digit())
-                || text.trim().starts_with("✅")
-                || text.trim().starts_with("Session ")
-            {
-                let num: usize = caps
-                    .get(1)
-                    .and_then(|m| m.as_str().parse().ok())
-                    .unwrap_or(1);
-                let idx = num.saturating_sub(1);
-                let sessions = ai_service.get_sessions(user_id).await;
-                if idx < sessions.len() {
-                    if !ai_service.switch_session(user_id, idx).await {
-                        let _ = bot
-                            .send_message(
-                                chat_id,
-                                "❌ Gagal mengganti sesi karena state aktif tidak dapat disimpan.",
-                                None,
-                                None,
-                                None,
-                                None,
-                            )
-                            .await;
-                        return;
-                    }
-                    let target_page = (idx / 5) + 1;
-                    send_or_update_session_manager(
-                        bot,
-                        ai_service,
-                        chat_id,
-                        user_id,
-                        None,
-                        target_page,
-                    )
-                    .await;
-                } else {
-                    handle_ai_chat(
-                        bot,
-                        ai_service,
-                        chat_id,
-                        user_id,
-                        ChatInput {
-                            prompt: &text,
-                            image_bytes,
-                            document_images,
-                            mime_type: mime_type.as_deref(),
-                            doc_text: doc_text.as_deref(),
-                            doc_name: doc_name.as_deref(),
-                            audio_bytes: None,
-                            audio_mime: None,
-                            video_bytes: None,
-                            video_mime: None,
-                            video_duration: None,
-                            model_snapshot: None,
-                        },
-                    )
-                    .await;
-                }
-            }
         } else if command_matches(&text, "/context")
             || [
                 "ᴄᴏɴᴛᴇxᴛ",
@@ -3352,7 +3117,16 @@ async fn handle_update(
             ]
             .contains(&text.as_str())
         {
-            send_or_update_context_monitor(bot, ai_service, chat_id, user_id, None).await;
+            let _ = bot
+                .send_message(
+                    chat_id,
+                    "ℹ️ <b>Status & Konteks Sistem</b> dikelola melalui backend terminal.\nJalankan <code>xiao status</code> di CLI untuk melihat statistik lengkap.",
+                    Some("HTML"),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
         } else if command_matches(&text, "/model")
             || [
                 "ᴍᴏᴅᴇʟ",
@@ -3364,84 +3138,18 @@ async fn handle_update(
                 "Pilih Model",
             ]
             .contains(&text.as_str())
+            || text.starts_with("⚡ ")
         {
-            if ai_service.has_configured_provider(user_id).await {
-                let query = command_args(&text, "/model").filter(|value| !value.is_empty());
-                if let Some(query) = query {
-                    ai_service
-                        .model_picker_query
-                        .write()
-                        .await
-                        .insert(user_id, query.to_string());
-                    let rich =
-                        build_main_model_picker_rich(ai_service, user_id, Some(query), 1).await;
-                    let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-                } else {
-                    ai_service.model_picker_query.write().await.remove(&user_id);
-                    send_model_dashboard(bot, ai_service, chat_id, user_id, None).await;
-                }
-            }
-        } else if text.starts_with("⚡ ") {
-            let selected_model = text.strip_prefix("⚡ ").unwrap_or(&text).trim();
-            let all_providers = ai_service.get_user_providers(user_id).await;
-            let mut found_prov = None;
-            for p in &all_providers {
-                if p.models.iter().any(|m| m == selected_model) {
-                    found_prov = Some(p.clone());
-                    break;
-                }
-            }
-
-            if let Some(prov) = found_prov {
-                if !ai_service
-                    .set_provider_model(user_id, &prov.id, selected_model)
-                    .await
-                {
-                    let _ = bot
-                        .send_message(
-                            chat_id,
-                            "❌ Gagal mengaktifkan model karena konfigurasi tidak dapat disimpan.",
-                            None,
-                            Some(get_main_menu_keyboard()),
-                            None,
-                            None,
-                        )
-                        .await;
-                    return;
-                }
-                let rich = InputRichMessage::new(vec![
-                    RichBlock::SectionHeading {
-                        text: Value::String("MAIN MODEL CHANGED".to_string()),
-                        level: 1,
-                    },
-                    RichBlock::Paragraph {
-                        text: Value::String(format!("{} / {}", prov.name, selected_model)),
-                    },
-                ]);
-                let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-            } else {
-                handle_ai_chat(
-                    bot,
-                    ai_service,
+            let _ = bot
+                .send_message(
                     chat_id,
-                    user_id,
-                    ChatInput {
-                        prompt: &text,
-                        image_bytes,
-                        document_images,
-                        mime_type: mime_type.as_deref(),
-                        doc_text: doc_text.as_deref(),
-                        doc_name: doc_name.as_deref(),
-                        audio_bytes: None,
-                        audio_mime: None,
-                        video_bytes: None,
-                        video_mime: None,
-                        video_duration: None,
-                        model_snapshot: None,
-                    },
+                    "ℹ️ <b>Pengaturan Model & Provider</b> dikelola melalui backend terminal.\nJalankan <code>xiao model</code> atau <code>xiao provider</code> di CLI.",
+                    Some("HTML"),
+                    None,
+                    None,
+                    None,
                 )
                 .await;
-            }
         } else if command_matches(&text, "/image")
             || [
                 "🫟 Buat Gambar",
@@ -3570,246 +3278,61 @@ async fn handle_update(
             }
         }
 
-        if let Some(id_str) = cq_data.strip_prefix("session_select_id:") {
-            if let Ok(session_id) = id_str.parse::<usize>() {
-                if ai_service.switch_session_by_id(user_id, session_id).await {
-                    let active_idx = ai_service.get_active_session_index(user_id).await;
-                    let target_page = (active_idx / 5) + 1;
-                    let _ = bot
-                        .answer_callback_query(&cq_id, Some("Session aktif diperbarui ✅"), false)
-                        .await;
-                    send_or_update_session_manager(
-                        bot,
-                        ai_service,
-                        chat_id,
-                        user_id,
-                        msg_id,
-                        target_page,
-                    )
-                    .await;
-                }
-            }
-        } else if let Some(id_str) = cq_data.strip_prefix("session_remove_id:") {
-            if let Ok(session_id) = id_str.parse::<usize>() {
-                if ai_service.remove_session_by_id(user_id, session_id).await {
-                    let new_active = ai_service.get_active_session_index(user_id).await;
-                    let target_page = (new_active / 5) + 1;
-                    let _ = bot
-                        .answer_callback_query(&cq_id, Some("Session berhasil dihapus 🗑️"), false)
-                        .await;
-                    send_or_update_session_manager(
-                        bot,
-                        ai_service,
-                        chat_id,
-                        user_id,
-                        msg_id,
-                        target_page,
-                    )
-                    .await;
-                }
-            }
-        } else if let Some(id_str) = cq_data.strip_prefix("session_rename_id:") {
-            if let Ok(session_id) = id_str.parse::<usize>() {
-                let sessions = ai_service.get_sessions(user_id).await;
-                if sessions.iter().any(|session| session.id == session_id) {
-                    ai_service
-                        .user_waiting_rename
-                        .write()
-                        .await
-                        .insert(user_id, session_id);
-                    if let Some(mid) = msg_id {
-                        ai_service
-                            .user_rename_msg_id
-                            .write()
-                            .await
-                            .insert(user_id, mid);
-                    }
-                    let _ = bot
-                        .answer_callback_query(&cq_id, Some("Silakan ketik nama baru"), false)
-                        .await;
-                    let _ = bot
-                        .send_message(
-                            chat_id,
-                            "✏️ <b>Ketikkan nama baru untuk session aktif:</b>",
-                            Some("HTML"),
-                            None,
-                            None,
-                            None,
-                        )
-                        .await;
-                }
-            }
-        } else if let Some(idx_str) = cq_data.strip_prefix("session_select:") {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                let switched = ai_service.switch_session(user_id, idx).await;
-                let target_page = (idx / 5) + 1;
-                let callback_text = if switched {
-                    format!("Beralih ke Session #{} ✅", idx + 1)
-                } else {
-                    "Session tidak berubah karena penyimpanan gagal.".to_string()
-                };
-                let _ = bot
-                    .answer_callback_query(&cq_id, Some(&callback_text), !switched)
-                    .await;
-                send_or_update_session_manager(
-                    bot,
-                    ai_service,
-                    chat_id,
-                    user_id,
-                    msg_id,
-                    target_page,
-                )
-                .await;
-            }
-        } else if cq_data == "session_new" {
-            if ai_service.create_new_session(user_id, None).await.is_none() {
+        if cq_data == "session_new" || cq_data == "open_new_session" {
+            if let Some(new_session) = ai_service.create_new_session(user_id, None).await {
                 let _ = bot
                     .answer_callback_query(
                         &cq_id,
-                        Some("Storage tidak tersedia; session tidak dibuat."),
-                        true,
+                        Some(&format!("Sesi #{} dibuat! ✨", new_session.id)),
+                        false,
                     )
-                    .await;
-                return;
-            }
-            let total_sessions = ai_service.get_sessions(user_id).await.len();
-            let target_page = total_sessions.saturating_sub(1) / 5 + 1;
-            let _ = bot
-                .answer_callback_query(&cq_id, Some("Session baru berhasil dibuat! ➕"), false)
-                .await;
-            send_or_update_session_manager(bot, ai_service, chat_id, user_id, msg_id, target_page)
-                .await;
-        } else if let Some(idx_str) = cq_data.strip_prefix("session_remove:") {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                let removed = ai_service.remove_session(user_id, idx).await;
-                let new_active = ai_service.get_active_session_index(user_id).await;
-                let target_page = (new_active / 5) + 1;
-                let callback_text = if removed {
-                    "Session berhasil dihapus 🗑️"
-                } else {
-                    "Session tidak dihapus karena penyimpanan gagal."
-                };
-                let _ = bot
-                    .answer_callback_query(&cq_id, Some(callback_text), !removed)
-                    .await;
-                send_or_update_session_manager(
-                    bot,
-                    ai_service,
-                    chat_id,
-                    user_id,
-                    msg_id,
-                    target_page,
-                )
-                .await;
-            }
-        } else if let Some(idx_str) = cq_data.strip_prefix("session_detail:") {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                let sessions = ai_service.get_sessions(user_id).await;
-                if let Some(session) = sessions.get(idx) {
-                    let name = if session.name.trim().is_empty() {
-                        format!("Session {}", idx + 1)
-                    } else {
-                        session.name.trim().to_string()
-                    };
-                    let detail = format!(
-                        "<b>{}</b>\n\nMessages: <b>{}</b>\nCreated: <code>{}</code>\nLast: <code>{}</code>",
-                        escape_html(&name),
-                        session.messages.len() / 2,
-                        escape_html(&session.created_at),
-                        escape_html(&session_last_activity(session))
-                    );
-                    let _ = bot.answer_callback_query(&cq_id, None, false).await;
-                    let _ = bot
-                        .send_message(chat_id, &detail, Some("HTML"), None, None, None)
-                        .await;
-                }
-            }
-        } else if let Some(idx_str) = cq_data.strip_prefix("session_rename:") {
-            if let Ok(idx) = idx_str.parse::<usize>() {
-                let sessions = ai_service.get_sessions(user_id).await;
-                let Some(session_id) = sessions.get(idx).map(|session| session.id) else {
-                    return;
-                };
-                ai_service
-                    .user_waiting_rename
-                    .write()
-                    .await
-                    .insert(user_id, session_id);
-                if let Some(mid) = msg_id {
-                    ai_service
-                        .user_rename_msg_id
-                        .write()
-                        .await
-                        .insert(user_id, mid);
-                }
-                let _ = bot
-                    .answer_callback_query(&cq_id, Some("Silakan ketik nama baru"), false)
                     .await;
                 let _ = bot
                     .send_message(
                         chat_id,
-                        &format!("✏️ <b>Ketikkan nama baru untuk Session #{}:</b>", idx + 1),
+                        &format!(
+                            "✨ <b>Sesi Baru Berhasil Dibuat (#{})!</b>\nRiwayat obrolan baru bersih dan siap digunakan.",
+                            new_session.id
+                        ),
                         Some("HTML"),
                         None,
                         None,
                         None,
                     )
                     .await;
+            } else {
+                let _ = bot
+                    .answer_callback_query(&cq_id, Some("Gagal membuat sesi baru."), true)
+                    .await;
             }
-        } else if let Some(page_str) = cq_data.strip_prefix("session_page:") {
-            if let Ok(p) = page_str.parse::<usize>() {
-                let _ = bot.answer_callback_query(&cq_id, None, false).await;
-                send_or_update_session_manager(bot, ai_service, chat_id, user_id, msg_id, p).await;
+        } else if cq_data.starts_with("session_") || cq_data == "open_session" {
+            if cq_data == "session_close" || cq_data == "provider_close" {
+                if let Some(mid) = msg_id {
+                    let _ = bot.delete_message(chat_id, mid).await;
+                }
+                let _ = bot
+                    .answer_callback_query(&cq_id, Some("Ditutup"), false)
+                    .await;
+            } else {
+                let _ = bot
+                    .answer_callback_query(
+                        &cq_id,
+                        Some("Manajemen sesi dialihkan ke CLI. Gunakan /new atau /clear."),
+                        false,
+                    )
+                    .await;
             }
-        } else if cq_data == "session_close" || cq_data == "provider_close" {
-            if let Some(mid) = msg_id {
-                let _ = bot.delete_message(chat_id, mid).await;
-            }
+        } else if cq_data == "model_dashboard"
+            || cq_data == "model_change_main"
+            || cq_data.starts_with("model_main_page:")
+        {
             let _ = bot
-                .answer_callback_query(&cq_id, Some("Menu ditutup"), false)
+                .answer_callback_query(
+                    &cq_id,
+                    Some("Pengaturan model dikelola melalui CLI (xiao model)."),
+                    false,
+                )
                 .await;
-        } else if cq_data == "open_session" {
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            send_or_update_session_manager(bot, ai_service, chat_id, user_id, None, 1).await;
-        } else if cq_data == "model_dashboard" {
-            ai_service.model_picker_query.write().await.remove(&user_id);
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            send_model_dashboard(bot, ai_service, chat_id, user_id, msg_id).await;
-        } else if cq_data == "model_change_main" {
-            ai_service.model_picker_query.write().await.remove(&user_id);
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            let rich = build_main_model_picker_rich(ai_service, user_id, None, 1).await;
-            if let Some(mid) = msg_id {
-                if bot
-                    .edit_rich_message(chat_id, mid, &rich, None)
-                    .await
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-            let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-        } else if let Some(page) = cq_data.strip_prefix("model_main_page:") {
-            let page = page.parse::<usize>().unwrap_or(1);
-            let query = ai_service
-                .model_picker_query
-                .read()
-                .await
-                .get(&user_id)
-                .cloned();
-            let rich =
-                build_main_model_picker_rich(ai_service, user_id, query.as_deref(), page).await;
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            if let Some(mid) = msg_id {
-                if bot
-                    .edit_rich_message(chat_id, mid, &rich, None)
-                    .await
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-            let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
         } else if cq_data == "action_help" {
             let _ = bot.answer_callback_query(&cq_id, None, false).await;
             let rich = build_help_ui();
@@ -3864,64 +3387,14 @@ async fn handle_update(
                         .await;
                 }
             }
-        } else if let Some(rest) = cq_data.strip_prefix("set_m:") {
-            let parts: Vec<&str> = rest.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                let prov_id = parts[0];
-                let model_idx: usize = parts[1].parse().unwrap_or(0);
-
-                let model_name_opt = ai_service
-                    .get_provider_model_by_index(user_id, prov_id, model_idx)
-                    .await;
-                if let Some(model_name) = model_name_opt {
-                    if !ai_service
-                        .set_provider_model(user_id, prov_id, &model_name)
-                        .await
-                    {
-                        let _ = bot
-                            .answer_callback_query(
-                                &cq_id,
-                                Some("Gagal menyimpan model aktif."),
-                                true,
-                            )
-                            .await;
-                        return;
-                    }
-                    let _ = bot
-                        .answer_callback_query(
-                            &cq_id,
-                            Some(&format!("Model aktif diset ke: {model_name}")),
-                            false,
-                        )
-                        .await;
-
-                    let new_stats = ai_service.get_context_stats(user_id).await;
-                    let warning = main_context_overflow_warning(
-                        &model_name,
-                        new_stats.total_tokens,
-                        new_stats.limit_tokens,
-                    );
-                    if let Some(warning) = warning {
-                        let warning_rich = InputRichMessage::new(vec![
-                            RichBlock::SectionHeading {
-                                text: Value::String("MAIN MODEL CHANGED".to_string()),
-                                level: 1,
-                            },
-                            RichBlock::BlockQuotation {
-                                blocks: vec![json!({"type":"paragraph","text": warning})],
-                            },
-                        ]);
-                        let _ = bot
-                            .send_rich_message(chat_id, &warning_rich, None, None)
-                            .await;
-                    }
-                    send_model_dashboard(bot, ai_service, chat_id, user_id, msg_id).await;
-                } else {
-                    let _ = bot
-                        .answer_callback_query(&cq_id, Some("Model tidak ditemukan."), false)
-                        .await;
-                }
-            }
+        } else if cq_data.starts_with("set_m:") {
+            let _ = bot
+                .answer_callback_query(
+                    &cq_id,
+                    Some("Pengaturan model dikelola melalui CLI (xiao model)."),
+                    false,
+                )
+                .await;
         } else if cq_data == "provider_cancel" {
             ai_service.user_wizard_state.write().await.remove(&user_id);
             let _ = bot
@@ -3967,46 +3440,17 @@ async fn handle_update(
             || cq_data == "show_context"
         {
             let _ = bot
-                .answer_callback_query(&cq_id, Some("Konteks diperbarui! 🧠"), false)
+                .answer_callback_query(
+                    &cq_id,
+                    Some("Status konteks dimonitor melalui CLI (xiao status)."),
+                    false,
+                )
                 .await;
-            send_or_update_context_monitor(bot, ai_service, chat_id, user_id, msg_id).await;
         } else if cq_data == "context_close" {
             let _ = bot.answer_callback_query(&cq_id, None, false).await;
             if let Some(mid) = msg_id {
                 let _ = bot.delete_message(chat_id, mid).await;
             }
-        } else if cq_data == "open_new_session" {
-            let Some(new_sess) = ai_service.create_new_session(user_id, None).await else {
-                let _ = bot
-                    .answer_callback_query(
-                        &cq_id,
-                        Some("Storage tidak tersedia; sesi tidak dibuat."),
-                        true,
-                    )
-                    .await;
-                return;
-            };
-            let _ = bot
-                .answer_callback_query(
-                    &cq_id,
-                    Some(&format!("Sesi #{} dibuat! ✨", new_sess.id)),
-                    false,
-                )
-                .await;
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    &format!(
-                        "✨ <b>Sesi Baru Berhasil Dibuat!</b>\nSesi aktif saat ini: <b>{}</b>",
-                        escape_html(&new_sess.name)
-                    ),
-                    Some("HTML"),
-                    Some(get_collapsed_menu_keyboard()),
-                    None,
-                    None,
-                )
-                .await;
-            send_or_update_session_manager(bot, ai_service, chat_id, user_id, None, 1).await;
         } else if cq_data == "action_clear" {
             let cleared = ai_service.clear_history(user_id).await;
             let rich = if cleared {
@@ -4039,8 +3483,13 @@ async fn handle_update(
             }
             let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
         } else if cq_data == "action_menu" {
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            send_menu(bot, ai_service, chat_id, user_id).await;
+            let _ = bot
+                .answer_callback_query(
+                    &cq_id,
+                    Some("Menu telah disederhanakan. Kirim pesan langsung untuk mengobrol."),
+                    false,
+                )
+                .await;
         } else {
             let _ = bot
                 .answer_callback_query(
@@ -4385,8 +3834,8 @@ mod update_lane_tests {
             "/help",
             "📱 Menu",
             "Session",
-            "Rename Session",
-            "Hal 2",
+            "New",
+            "Clear",
         ] {
             assert!(is_control_message_text(text), "{text}");
         }
@@ -4464,10 +3913,8 @@ mod update_lane_tests {
 
     #[test]
     fn start_and_menu_contracts_remain_distinct() {
-        let start_buttons = ["New Chat", "Model", "Session", "Context"];
-        let menu_extra = ["Generate Image", "Help"];
-        assert_eq!(start_buttons.len(), 4);
-        assert_eq!(menu_extra.len(), 2);
+        let start_buttons: [&str; 0] = [];
+        assert_eq!(start_buttons.len(), 0);
     }
 
     #[test]

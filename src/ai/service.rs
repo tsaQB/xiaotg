@@ -324,36 +324,87 @@ fn push_bounded(target: &mut String, chunk: &str, max_bytes: usize) -> bool {
     true
 }
 
-fn require_verified_capability(
-    capability: Option<&CapabilityRecord>,
-    kind: CapabilityKind,
-    capability_name: &str,
-) -> Result<(), String> {
-    match capability
-        .map(|record| record.effective_state_for(kind))
-        .unwrap_or(CapabilityState::Unknown)
-    {
-        CapabilityState::Supported => Ok(()),
-        CapabilityState::Unsupported => {
-            Err(format!("{capability_name} tidak didukung oleh model aktif"))
-        }
-        CapabilityState::Unknown => Err(format!(
-            "capability {capability_name} belum terverifikasi atau evidence sudah stale; XiaoAI menolak input ini sampai probe/metadata fresh mengonfirmasi dukungan"
-        )),
-    }
-}
-
 fn history_attachment_authorized(
-    capability: Option<&CapabilityRecord>,
+    snapshot: &GenerationModelSnapshot,
     attachment_kind: &str,
 ) -> bool {
-    let kind = match attachment_kind {
-        "image" | "document_page" => CapabilityKind::ImageInput,
-        "audio" => CapabilityKind::AudioInput,
-        "video" => CapabilityKind::VideoInput,
+    let role = match attachment_kind {
+        "image" | "document_page" => ModelRole::Vision,
+        "audio" => ModelRole::AudioStt,
+        "video" => ModelRole::Video,
         _ => return false,
     };
-    capability.is_some_and(|record| record.effective_state_for(kind) == CapabilityState::Supported)
+    AIChatService::resolve_model_route_from_snapshot(snapshot, role)
+        .is_ok_and(|route| route.route_origin == RouteOrigin::MainModel)
+}
+
+fn sanitize_legacy_history(value: &Value, snapshot: &GenerationModelSnapshot) -> Value {
+    use base64::Engine;
+
+    let Some(parts) = value.as_array() else {
+        return value.as_str().map_or_else(
+            || Value::String("[Unrecognized historical content omitted.]".into()),
+            |text| Value::String(text.to_string()),
+        );
+    };
+    let mut budget = 12 * 1024 * 1024usize;
+    let content = parts.iter().map(|part| {
+        let valid = match part.get("type").and_then(Value::as_str) {
+            Some("text") => part.get("text").is_some_and(Value::is_string),
+            Some("image_url") => {
+                part.pointer("/image_url/url").and_then(Value::as_str).is_some_and(|url| {
+                    let Some((header, encoded)) = url.split_once(";base64,") else {
+                        return false;
+                    };
+                    let Some(mime) = header.strip_prefix("data:") else {
+                        return false;
+                    };
+                    let kind = if mime.starts_with("video/") { "video" } else { "image" };
+                    if !history_attachment_authorized(snapshot, kind)
+                        || encoded.len() > budget.saturating_mul(4).div_ceil(3)
+                    {
+                        return false;
+                    }
+                    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+                        return false;
+                    };
+                    let prefix = if kind == "video" { "video/" } else { "image/" };
+                    if bytes.is_empty() || bytes.len() > budget
+                        || media_data_url(&bytes, Some(mime), prefix, "historical media").is_err()
+                    {
+                        return false;
+                    }
+                    budget -= bytes.len();
+                    true
+                })
+            }
+            Some("input_audio") if history_attachment_authorized(snapshot, "audio") => {
+                let format = part.pointer("/input_audio/format").and_then(Value::as_str).unwrap_or("");
+                let encoded = part.pointer("/input_audio/data").and_then(Value::as_str).unwrap_or("");
+                if !matches!(format, "mp3" | "wav" | "ogg" | "opus" | "mp4" | "m4a" | "flac" | "webm")
+                    || encoded.len() > budget.saturating_mul(4).div_ceil(3)
+                {
+                    false
+                } else if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) {
+                    if bytes.is_empty() || bytes.len() > budget {
+                        false
+                    } else {
+                        budget -= bytes.len();
+                        true
+                    }
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        };
+        if valid {
+            part.clone()
+        } else {
+            json!({"type": "text", "text": "[Historical media omitted: route unavailable, specialist-only, or unsafe payload.]"})
+        }
+    }).collect();
+    Value::Array(content)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -363,29 +414,15 @@ enum AudioExecutionMode {
 }
 
 fn select_audio_execution_mode(
-    capability: &CapabilityRecord,
+    _capability: &CapabilityRecord,
     inherited_main: bool,
     mime_type: Option<&str>,
     file_name: Option<&str>,
 ) -> Result<AudioExecutionMode, String> {
-    let native = capability.effective_state_for(CapabilityKind::AudioInput);
-    let transcription = capability.effective_state_for(CapabilityKind::AudioTranscription);
-    let native_format = native_audio_input_format(mime_type, file_name);
-
-    if inherited_main && native == CapabilityState::Supported && native_format.is_ok() {
+    if inherited_main && native_audio_input_format(mime_type, file_name).is_ok() {
         Ok(AudioExecutionMode::Native)
-    } else if transcription == CapabilityState::Supported {
-        Ok(AudioExecutionMode::Transcription)
-    } else if inherited_main && native == CapabilityState::Supported {
-        Err(format!(
-            "Main Model supports native audio, but this file cannot be represented safely by Xiao's native input_audio contract ({}) and AudioTranscription is not fresh Supported.",
-            native_format.unwrap_err()
-        ))
     } else {
-        Err(
-            "Audio STT route has no fresh Supported native-audio or transcription capability."
-                .to_string(),
-        )
+        Ok(AudioExecutionMode::Transcription)
     }
 }
 
@@ -885,20 +922,20 @@ impl AIChatService {
         user_id: i64,
         session_id: usize,
         value: &Value,
-        capability: Option<&CapabilityRecord>,
+        snapshot: &GenerationModelSnapshot,
     ) -> Value {
         let Some(persisted) = decode_user_content(value) else {
-            return value.clone();
+            return sanitize_legacy_history(value, snapshot);
         };
 
         let mut text = persisted.text;
         let mut parts = Vec::new();
         let mut total_loaded = 0usize;
         for attachment in persisted.attachments {
-            let allowed = history_attachment_authorized(capability, attachment.kind.as_str());
+            let allowed = history_attachment_authorized(snapshot, attachment.kind.as_str());
             if !allowed {
                 text.push_str(&format!(
-                    "\n[Attachment '{}' omitted because current model capability is unsupported/unknown.]",
+                    "\n[Attachment '{}' omitted because its route is disabled, unavailable, or assigned to a specialist.]",
                     attachment.name.as_deref().unwrap_or(&attachment.kind)
                 ));
                 continue;
@@ -1492,19 +1529,6 @@ impl AIChatService {
             Ok(route) => route,
             Err(error) => return (false, Err(error)),
         };
-        if route
-            .capability
-            .effective_state_for(CapabilityKind::AudioTranscription)
-            != CapabilityState::Supported
-        {
-            return (
-                false,
-                Err(
-                    "Audio STT Model menggunakan input audio native dan tidak menyediakan endpoint transkripsi terverifikasi."
-                        .to_string(),
-                ),
-            );
-        }
         match self
             .transcribe_audio_resolved(&route, audio_bytes, file_name, mime_type)
             .await
@@ -1629,6 +1653,12 @@ impl AIChatService {
         mime_type: Option<&str>,
     ) -> Result<String, String> {
         let (safe_mime, safe_filename) = resolve_audio_file_and_mime(mime_type, Some(file_name));
+        if audio_bytes.is_empty() || audio_bytes.len() > 20 * 1024 * 1024 {
+            return Err("Audio kosong atau melebihi batas 20 MiB.".into());
+        }
+        if !safe_mime.starts_with("audio/") {
+            return Err("Format audio tidak dapat direpresentasikan untuk transkripsi.".into());
+        }
         let stt_url = provider_url(&route.provider.endpoint, "audio/transcriptions");
         let part = Part::bytes(audio_bytes)
             .file_name(safe_filename)
@@ -1747,6 +1777,7 @@ impl AIChatService {
                 .generate_response_on_main(
                     user_id,
                     &main,
+                    snapshot,
                     GenerationInput {
                         prompt,
                         canonical_prompt: None,
@@ -1799,6 +1830,7 @@ impl AIChatService {
                     .generate_response_on_main(
                         user_id,
                         &main,
+                        snapshot,
                         GenerationInput {
                             prompt,
                             canonical_prompt: None,
@@ -1852,6 +1884,7 @@ impl AIChatService {
                 .generate_response_on_main(
                     user_id,
                     &main,
+                    snapshot,
                     GenerationInput {
                         prompt: &synthesis_prompt,
                         canonical_prompt: Some(prompt),
@@ -1878,6 +1911,7 @@ impl AIChatService {
                 .generate_response_on_main(
                     user_id,
                     &main,
+                    snapshot,
                     GenerationInput {
                         prompt,
                         canonical_prompt: None,
@@ -1897,26 +1931,6 @@ impl AIChatService {
                     cancel_rx,
                 )
                 .await;
-        }
-
-        let required_capability = match role {
-            ModelRole::Vision => Some((CapabilityKind::ImageInput, "vision/image")),
-            ModelRole::Video => Some((CapabilityKind::VideoInput, "video")),
-            ModelRole::AudioStt | ModelRole::Main | ModelRole::ImageGeneration => None,
-        };
-        if let Some((kind, name)) = required_capability {
-            if let Err(error) =
-                require_verified_capability(Some(&specialist.capability), kind, name)
-            {
-                return (
-                    None,
-                    format!(
-                        "{} / {} tidak dapat memproses media: {error}.",
-                        specialist.provider.name, specialist.model
-                    ),
-                    false,
-                );
-            }
         }
 
         let observation_result = tokio::select! {
@@ -1953,6 +1967,7 @@ impl AIChatService {
         self.generate_response_on_main(
             user_id,
             &main,
+            snapshot,
             GenerationInput {
                 prompt: &synthesis_prompt,
                 canonical_prompt: Some(prompt),
@@ -1978,6 +1993,7 @@ impl AIChatService {
         &self,
         user_id: i64,
         main_route: &ResolvedModelRoute,
+        snapshot: &GenerationModelSnapshot,
         input: GenerationInput<'_>,
         cancel_rx: &mut watch::Receiver<bool>,
     ) -> (Option<String>, String, bool) {
@@ -2000,36 +2016,6 @@ impl AIChatService {
 
         let provider = &main_route.provider;
         let model = &main_route.model;
-        let capability = &main_route.capability;
-
-        let required_capability = if media_to_main
-            && (document_images
-                .as_ref()
-                .is_some_and(|pages| !pages.is_empty())
-                || image_bytes.is_some())
-        {
-            require_verified_capability(
-                Some(capability),
-                CapabilityKind::ImageInput,
-                "vision/image",
-            )
-        } else if media_to_main && video_bytes.is_some() {
-            require_verified_capability(Some(capability), CapabilityKind::VideoInput, "video")
-        } else if media_to_main && audio_bytes.is_some() {
-            require_verified_capability(Some(capability), CapabilityKind::AudioInput, "audio")
-        } else {
-            Ok(())
-        };
-        if let Err(reason) = required_capability {
-            return (
-                None,
-                format!(
-                    "Endpoint '{}' / model '{}' tidak dapat menerima media ini: {reason}.",
-                    provider.name, model
-                ),
-                false,
-            );
-        }
 
         let Some(active_sess) = self.get_active_session(user_id).await else {
             return (
@@ -2128,7 +2114,7 @@ impl AIChatService {
                     user_id,
                     request_session_id,
                     &message.content,
-                    Some(capability),
+                    snapshot,
                 )
                 .await
             } else {
@@ -2330,7 +2316,9 @@ impl AIChatService {
                     }
                     Ok(resp) if resp.status().as_u16() == 400 && payload.get("tools").is_some() => {
                         drop(resp);
-                        warn!("Provider rejected tools parameter (HTTP 400); retrying without tools");
+                        warn!(
+                            "Provider rejected tools parameter (HTTP 400); retrying without tools"
+                        );
                         payload.as_object_mut().unwrap().remove("tools");
                         continue;
                     }
@@ -2341,8 +2329,9 @@ impl AIChatService {
                     Err(e) => {
                         let retryable_transport = e.is_timeout() || e.is_connect();
                         if retryable_transport && attempt + 1 < MAX_PROVIDER_ATTEMPTS {
-                            let delay =
-                                Duration::from_millis(500_u64.saturating_mul(1_u64 << attempt.min(5)));
+                            let delay = Duration::from_millis(
+                                500_u64.saturating_mul(1_u64 << attempt.min(5)),
+                            );
                             warn!(
                                 "Transient provider transport failure; retrying attempt {}/{}",
                                 attempt + 2,
@@ -2467,9 +2456,12 @@ impl AIChatService {
                                 continue;
                             };
 
-                            if let Some(tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+                            if let Some(tool_calls) =
+                                delta.get("tool_calls").and_then(Value::as_array)
+                            {
                                 for tc in tool_calls {
-                                    let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                                    let index = tc.get("index").and_then(Value::as_u64).unwrap_or(0)
+                                        as usize;
                                     while accumulated_tool_calls.len() <= index {
                                         accumulated_tool_calls.push(PendingToolCall::default());
                                     }
@@ -2477,10 +2469,13 @@ impl AIChatService {
                                         accumulated_tool_calls[index].id.push_str(id);
                                     }
                                     if let Some(func) = tc.get("function") {
-                                        if let Some(name) = func.get("name").and_then(Value::as_str) {
+                                        if let Some(name) = func.get("name").and_then(Value::as_str)
+                                        {
                                             accumulated_tool_calls[index].name.push_str(name);
                                         }
-                                        if let Some(args) = func.get("arguments").and_then(Value::as_str) {
+                                        if let Some(args) =
+                                            func.get("arguments").and_then(Value::as_str)
+                                        {
                                             accumulated_tool_calls[index].arguments.push_str(args);
                                         }
                                     }
@@ -2606,9 +2601,7 @@ impl AIChatService {
                         let parsed_url = serde_json::from_str::<Value>(&tc.arguments)
                             .ok()
                             .and_then(|v| {
-                                v.get("url")
-                                    .and_then(Value::as_str)
-                                    .map(|s| s.to_string())
+                                v.get("url").and_then(Value::as_str).map(|s| s.to_string())
                             })
                             .unwrap_or_else(|| tc.arguments.clone());
 
@@ -2986,6 +2979,12 @@ impl AIChatService {
         snapshot: &GenerationModelSnapshot,
         cancel_rx: &mut watch::Receiver<bool>,
     ) -> Result<GeneratedImage, ImageGenerationError> {
+        if *cancel_rx.borrow() {
+            return Err(ImageGenerationError::new(
+                ImageGenerationErrorKind::Cancelled,
+                "Pembuatan gambar dibatalkan.",
+            ));
+        }
         let clean_prompt = prompt.trim();
         let route = Self::resolve_model_route_from_snapshot(snapshot, ModelRole::ImageGeneration)
             .map_err(|error| {
@@ -3035,7 +3034,7 @@ impl AIChatService {
                     )),
                     Err(error) => Err(ImageGenerationError::new(
                         ImageGenerationErrorKind::Provider,
-                        format!("Koneksi ke Image Generation Model gagal: {error}"),
+                        format!("Koneksi ke Image Generation Model gagal: {}", error.without_url()),
                     )),
                     Ok(response) if !response.status().is_success() => {
                         let status = response.status();
@@ -3058,9 +3057,8 @@ impl AIChatService {
                         Err(ImageGenerationError::new(
                             kind,
                             format!(
-                                "Image Generation Model mengembalikan HTTP {}: {}",
-                                status.as_u16(),
-                                truncate_chars(&detail, 160)
+                                "Image Generation Model mengembalikan HTTP {}. Periksa konfigurasi endpoint/model dan batas provider.",
+                                status.as_u16()
                             ),
                         ))
                     }
@@ -3104,20 +3102,6 @@ impl AIChatService {
                     }
                 }
             }
-        };
-
-        let provider_result = match provider_result {
-            Ok(img) => Ok(img),
-            Err(err) if err.kind == ImageGenerationErrorKind::ProtocolMismatch => {
-                match self
-                    .generate_image_via_chat_completion(&route, clean_prompt, cancel_rx)
-                    .await
-                {
-                    Ok(img) => Ok(img),
-                    Err(_) => Err(err),
-                }
-            }
-            Err(err) => Err(err),
         };
 
         let primary_failure = match provider_result {
@@ -3212,6 +3196,7 @@ impl AIChatService {
         })
     }
 
+    #[allow(dead_code)]
     async fn generate_image_via_chat_completion(
         &self,
         route: &ResolvedModelRoute,
@@ -3470,71 +3455,90 @@ mod tests {
     }
 
     #[test]
-    fn multimodal_runtime_authorization_is_freshness_aware() {
-        let fresh = evidence_record(
-            CapabilityKind::ImageInput,
-            CapabilityState::Supported,
-            chrono::Duration::hours(1),
-        );
-        assert!(
-            require_verified_capability(Some(&fresh), CapabilityKind::ImageInput, "image",).is_ok()
-        );
-        assert!(history_attachment_authorized(Some(&fresh), "image"));
-        assert!(history_attachment_authorized(Some(&fresh), "document_page"));
-
-        let mut stale = evidence_record(
-            CapabilityKind::ImageInput,
-            CapabilityState::Supported,
-            chrono::Duration::days(8),
-        );
-        stale.evidence.push(crate::ai::storage::CapabilityEvidence {
-            capability: CapabilityKind::TextChat,
-            source: crate::ai::storage::CapabilityEvidenceSource::ActiveProbe,
-            outcome: CapabilityState::Supported,
-            checked_at: chrono::Utc::now().to_rfc3339(),
-            detail: None,
-        });
-        assert_eq!(
-            stale.effective_state_for(CapabilityKind::TextChat),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            stale.effective_state_for(CapabilityKind::ImageInput),
-            CapabilityState::Unknown
-        );
-        assert!(
-            require_verified_capability(Some(&stale), CapabilityKind::ImageInput, "image",)
-                .is_err()
-        );
-        assert!(!history_attachment_authorized(Some(&stale), "image"));
-        assert!(!history_attachment_authorized(
-            Some(&stale),
-            "document_page"
-        ));
-
-        let unsupported = evidence_record(
-            CapabilityKind::ImageInput,
-            CapabilityState::Unsupported,
-            chrono::Duration::hours(1),
-        );
-        assert!(!history_attachment_authorized(Some(&unsupported), "image"));
-        assert!(!history_attachment_authorized(None, "image"));
-    }
-
-    #[test]
-    fn stale_historical_audio_and_video_are_omitted() {
-        let stale_audio = evidence_record(
-            CapabilityKind::AudioInput,
-            CapabilityState::Supported,
-            chrono::Duration::days(8),
-        );
-        let stale_video = evidence_record(
-            CapabilityKind::VideoInput,
-            CapabilityState::Supported,
-            chrono::Duration::days(8),
-        );
-        assert!(!history_attachment_authorized(Some(&stale_audio), "audio"));
-        assert!(!history_attachment_authorized(Some(&stale_video), "video"));
+    fn history_replay_uses_routes_not_diagnostic_evidence() {
+        let provider = ProviderConfig {
+            id: "main".into(),
+            name: "Main".into(),
+            endpoint: "https://a.example/v1".into(),
+            api_key: String::new(),
+            api_key_ref: None,
+            models: vec!["model".into()],
+            active_model: "model".into(),
+        };
+        let mut snapshot = GenerationModelSnapshot {
+            provider_store: ProviderStore {
+                active_id: Some(provider.id.clone()),
+                providers: vec![provider.clone()],
+                telegram_models: vec![],
+            },
+            routing: super::super::routing::ModelRoutingConfig::default(),
+            capabilities: super::super::storage::CapabilityRegistry { models: vec![] },
+        };
+        for (kind, role, modality, part) in [
+            (
+                "image",
+                ModelRole::Vision,
+                CapabilityKind::ImageInput,
+                json!({"type":"image_url", "image_url":{"url":"data:image/png;base64,aW1hZ2U="}}),
+            ),
+            (
+                "video",
+                ModelRole::Video,
+                CapabilityKind::VideoInput,
+                json!({"type":"image_url", "image_url":{"url":"data:video/mp4;base64,dmlkZW8="}}),
+            ),
+            (
+                "audio",
+                ModelRole::AudioStt,
+                CapabilityKind::AudioInput,
+                json!({"type":"input_audio", "input_audio":{"format":"mp3", "data":"YXVkaW8="}}),
+            ),
+        ] {
+            for state in [
+                CapabilityState::Unknown,
+                CapabilityState::Supported,
+                CapabilityState::Unsupported,
+            ] {
+                for age in [chrono::Duration::hours(1), chrono::Duration::days(90)] {
+                    let mut record = evidence_record(modality, state, age);
+                    record.provider_id = provider.endpoint.clone();
+                    record.model = provider.active_model.clone();
+                    snapshot.capabilities.models = vec![record];
+                    snapshot
+                        .routing
+                        .set_route(role, ModelRoute::MainModel)
+                        .unwrap();
+                    assert!(history_attachment_authorized(&snapshot, kind));
+                    let legacy = json!([part.clone()]);
+                    assert_eq!(sanitize_legacy_history(&legacy, &snapshot), legacy);
+                    for route in [
+                        ModelRoute::Disabled,
+                        ModelRoute::Specific {
+                            provider_id: provider.id.clone(),
+                            model: "model".into(),
+                        },
+                    ] {
+                        snapshot.routing.set_route(role, route).unwrap();
+                        assert!(!history_attachment_authorized(&snapshot, kind));
+                        assert_ne!(sanitize_legacy_history(&legacy, &snapshot), legacy);
+                    }
+                }
+            }
+            snapshot
+                .routing
+                .set_route(role, ModelRoute::MainModel)
+                .unwrap();
+        }
+        let unsafe_legacy = json!([
+            {"type":"image_url", "image_url":{"url":"http://127.0.0.1/private"}},
+            {"type":"image_url", "image_url":{"url":"data:image/png;base64,%%%"}},
+            {"type":"input_audio", "input_audio":{"format":"exe", "data":"YQ=="}}
+        ]);
+        assert!(sanitize_legacy_history(&unsafe_legacy, &snapshot)
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|part| part["type"] == "text"));
     }
 
     #[test]
@@ -3678,7 +3682,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_execution_uses_format_and_fresh_effective_capability() {
+    fn audio_execution_uses_route_and_format_not_evidence() {
         fn combined(
             native: (CapabilityState, chrono::Duration),
             stt: (CapabilityState, chrono::Duration),
@@ -3742,7 +3746,7 @@ mod tests {
                 Some("audio/mpeg"),
                 Some("clip.mp3"),
             ),
-            Ok(AudioExecutionMode::Transcription)
+            Ok(AudioExecutionMode::Native)
         );
 
         assert_eq!(
@@ -3755,19 +3759,41 @@ mod tests {
                 Some("audio/wav"),
                 Some("clip.wav"),
             ),
-            Ok(AudioExecutionMode::Transcription)
+            Ok(AudioExecutionMode::Native)
         );
 
-        assert!(select_audio_execution_mode(
-            &combined(
-                (CapabilityState::Supported, stale),
-                (CapabilityState::Supported, stale),
+        assert_eq!(
+            select_audio_execution_mode(
+                &combined(
+                    (CapabilityState::Supported, stale),
+                    (CapabilityState::Supported, stale),
+                ),
+                true,
+                Some("audio/mp3"),
+                Some("clip.mp3"),
             ),
-            true,
-            Some("audio/mp3"),
-            Some("clip.mp3"),
-        )
-        .is_err());
+            Ok(AudioExecutionMode::Native)
+        );
+        for inherited_main in [false, true] {
+            assert_eq!(
+                select_audio_execution_mode(
+                    &CapabilityRecord::default(),
+                    inherited_main,
+                    None,
+                    None,
+                ),
+                Ok(AudioExecutionMode::Transcription)
+            );
+        }
+        assert_eq!(
+            select_audio_execution_mode(
+                &CapabilityRecord::default(),
+                false,
+                Some("audio/mp3"),
+                Some("clip.mp3"),
+            ),
+            Ok(AudioExecutionMode::Transcription)
+        );
     }
 
     #[test]
@@ -4054,6 +4080,140 @@ mod tests {
         assert!(!persistence.contains("video_mime.unwrap_or(\"video/mp4\")"));
         assert!(!persistence.contains("audio_mime.unwrap_or(\"application/octet-stream\")"));
         assert!(persistence.contains("resolved_audio_persistence_mime(audio_mime, doc_name)"));
+    }
+
+    fn isolated_service(provider: ProviderConfig) -> AIChatService {
+        AIChatService {
+            client: Client::builder().no_proxy().build().unwrap(),
+            user_sessions: Default::default(),
+            active_session_id: Default::default(),
+            generation_locks: Default::default(),
+            session_locks: Default::default(),
+            active_generations: Default::default(),
+            user_waiting_rename: Default::default(),
+            user_rename_msg_id: Default::default(),
+            user_session_msg_id: Default::default(),
+            provider_store: Arc::new(RwLock::new(ProviderStore {
+                active_id: Some(provider.id.clone()),
+                providers: vec![provider],
+                telegram_models: vec![],
+            })),
+            capability_registry: Default::default(),
+            model_routing: Default::default(),
+            user_wizard_state: Default::default(),
+            model_metadata: Default::default(),
+            model_picker_query: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn transcription_uses_selected_transport_without_probe_or_real_state() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for status in ["200 OK", "415 Unsupported Media Type"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut buffer = [0u8; 4096];
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    bytes.extend_from_slice(&buffer[..count]);
+                    assert!(bytes.len() < 128 * 1024);
+                    if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                        let headers = String::from_utf8_lossy(&bytes[..end]);
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap();
+                        if bytes.len() >= end + 4 + length {
+                            break;
+                        }
+                    }
+                }
+                requests.push(String::from_utf8(bytes).unwrap());
+                let body = r#"{"text":"sample transcript"}"#;
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+            requests
+        });
+        let provider = ProviderConfig {
+            id: "selected".into(),
+            name: "Selected".into(),
+            endpoint: format!("http://{address}/v1"),
+            api_key: String::new(),
+            api_key_ref: None,
+            models: vec!["new-model".into()],
+            active_model: "new-model".into(),
+        };
+        let service = isolated_service(provider.clone());
+        let snapshot = service.generation_model_snapshot().await;
+        let route =
+            AIChatService::resolve_model_route_from_snapshot(&snapshot, ModelRole::AudioStt)
+                .unwrap();
+        {
+            let mut live = service.provider_store.write().await;
+            live.providers[0].endpoint = "http://127.0.0.1:1/changed".into();
+            live.providers[0].active_model = "later-model".into();
+        }
+        assert_eq!(
+            service
+                .transcribe_audio_resolved(
+                    &route,
+                    b"sample".to_vec(),
+                    "sample.mp3",
+                    Some("audio/mpeg"),
+                )
+                .await
+                .unwrap(),
+            "sample transcript"
+        );
+        let error = service
+            .transcribe_audio_resolved(&route, b"sample".to_vec(), "sample.mp3", Some("audio/mpeg"))
+            .await
+            .unwrap_err();
+        assert!(error.contains("415"));
+        assert!(!error.contains("probe"));
+        assert!(service.capability_registry.read().await.models.is_empty());
+        let requests = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            assert!(request.starts_with("POST /v1/audio/transcriptions "));
+            assert!(request.contains("new-model"));
+            assert!(!request.contains("later-model"));
+        }
+        let mut disabled = snapshot.clone();
+        disabled.routing.audio_stt = ModelRoute::Disabled;
+        disabled.routing.image_gen = ModelRoute::Disabled;
+        assert!(
+            AIChatService::resolve_model_route_from_snapshot(&disabled, ModelRole::AudioStt,)
+                .is_err()
+        );
+        let (_cancel, mut receiver) = watch::channel(false);
+        let error = service
+            .generate_image_with_snapshot(0, "test", 64, 64, &disabled, &mut receiver)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ImageGenerationErrorKind::RouteDisabled);
+        assert!(service
+            .transcribe_audio_resolved(&route, vec![], "unsafe.bin", None,)
+            .await
+            .is_err());
     }
 
     #[test]

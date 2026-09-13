@@ -25,8 +25,8 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
 }
 
 #[allow(dead_code)]
-pub fn build_full_rich_message(answer_text: &str, model_name: Option<&str>) -> InputRichMessage {
-    let mut message = markdown::build_full_rich_message(answer_text, model_name);
+pub fn build_full_rich_message(answer_text: &str, footer_text: Option<&str>) -> InputRichMessage {
+    let mut message = markdown::build_full_rich_message(answer_text, footer_text);
     normalize_bot_api_10_3_media(&mut message.blocks);
     message
 }

@@ -20,10 +20,10 @@
 - Split image input from image generation and audio input from transcription; migrate legacy fields without granting new capabilities.
 - Stop treating `/models` catalog presence as proof of text-chat support.
 - Add per-capability evidence/freshness, observable typed probe outcomes, two-step semantic Vision probing, a bounded semantic Video MP4 probe, bounded audio/STT probes, and explicit credit-consuming image-generation tests whose returned image must pass the runtime validator.
-- Keep Unknown/stale capability fail-closed and persist probe candidates before runtime publication.
+- Treat capability evidence as diagnostic; probe is optional and does not gate runtime usage of configured routes.
 
 ### Multimodal execution
-- Route verified Main-compatible image/video/audio directly to Main without a redundant specialist pass.
+- Route configured Main-compatible image/video/audio directly to Main without a redundant specialist pass or probe requirement.
 - Route different Vision/Video specialists through bounded observations and Audio STT specialists through transcripts before Main synthesis, without sending full canonical history to the specialist.
 - Keep only the canonical user/final assistant turn in session history.
 - Route scanned-PDF render pages through the configured Vision role.
@@ -48,13 +48,14 @@
 - Keep attachment cleanup after the corresponding durable session transaction commits.
 
 ### Security & reliability
-- Make new and rehydrated multimodal inputs fail closed unless the active capability record explicitly reports support.
+- Treat capability evidence as non-blocking diagnostics, allowing immediate direct requests to configured endpoints while rejecting unconfigured or Disabled routes.
 - Move provider API keys and Telegram bot token out of ordinary plaintext configuration rows into a separately permissioned local SecretStore referenced by `secret://...`; migrate legacy plaintext only after the new secret commits.
 - Retain Telegram inbox payloads through claim and recover abandoned `processing` rows, documenting the resulting at-least-once semantics instead of exactly-once.
 - Add absolute visible/reasoning/wire SSE ceilings and prevent bounded/truncated streams from becoming normal canonical history.
 - Propagate CLI/provider persistence failures instead of reporting false success.
 
 ### Rendering & Telegram
+- Streamline Telegram to an ultra-clean chat surface by removing /model, /context, /menu, ReplyKeyboards, and complex pagination/rename inline widgets; all model, specialist, and system controls are managed via CLI while keeping Telegram dedicated to direct chat, /clear, /new, and /image.
 - Split streaming Markdown into stable native-Rich content plus a sanitized provisional tail so incomplete delimiters do not flash raw syntax.
 - Enforce local Rich Message structural budgets and degrade deterministically when a payload exceeds them.
 - Make permanent fallback canonical: Rich AST → safe HTML → AST-derived semantic plain text; never raw model Markdown.

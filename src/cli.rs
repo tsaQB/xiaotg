@@ -1678,18 +1678,6 @@ async fn run_cli_addon_role_submenu(ai_service: &AIChatService, role: ModelRole)
                         role.display_name(),
                         chosen_label
                     );
-                    print!("\n  \x1b[1;36mUji kapabilitas model ini sekarang untuk memastikan kompatibilitas? [Y/n]:\x1b[0m ");
-                    let _ = io::stdout().flush();
-                    let mut ans = String::new();
-                    let _ = io::stdin().read_line(&mut ans);
-                    if !ans.trim().eq_ignore_ascii_case("n") {
-                        if role == ModelRole::ImageGeneration {
-                            run_cli_probe_test_image_gen(ai_service).await;
-                        } else {
-                            run_cli_probe_test_role(ai_service, role).await;
-                        }
-                        print_press_enter();
-                    }
                 }
             }
         }
@@ -1777,11 +1765,6 @@ async fn run_cli_addon_test_all_routes(ai_service: &AIChatService) {
                 Err(e) => {
                     println!("    \x1b[31m✖ Error probe: {e}\x1b[0m");
                 }
-            }
-
-            match ai_service.test_model_role(role).await {
-                Ok(detail) => println!("    \x1b[1;32m✔ Live Test Fungsional:\x1b[0m {detail}"),
-                Err(error) => println!("    \x1b[31m✖ Live Test Fungsional:\x1b[0m {error}"),
             }
         }
         println!();
@@ -1906,7 +1889,7 @@ async fn run_cli_probe_all_active(ai_service: &AIChatService) {
         }
         println!("  ● Provider: \x1b[1m{}\x1b[0m ({})", prov.name, model);
         if let Some(record) = run_persisted_capability_probe(ai_service, prov, model).await {
-            println!("    \x1b[1;37mRingkasan Kapabilitas Terverifikasi:\x1b[0m");
+            println!("    \x1b[1;37mRingkasan Diagnostik Kapabilitas:\x1b[0m");
             println!(
                 "      • Text Chat        : {}",
                 format_cap_bool_badge(record.supports_text_chat)
@@ -1945,9 +1928,7 @@ async fn run_cli_probe_all_active(ai_service: &AIChatService) {
         }
         println!();
     }
-    println!(
-        "\x1b[1;32m✔ Kapabilitas berhasil diverifikasi dan disimpan ke database SQLite.\x1b[0m"
-    );
+    println!("\x1b[1;32m✔ Diagnostik selesai. Hasil tidak membatasi penggunaan route.\x1b[0m");
 }
 
 async fn run_cli_probe_test_role(ai_service: &AIChatService, role: ModelRole) {
@@ -1955,7 +1936,7 @@ async fn run_cli_probe_test_role(ai_service: &AIChatService, role: ModelRole) {
         "\n\x1b[1;36mDiagnostik & Live Test: {}\x1b[0m",
         role.display_name()
     );
-    println!("  1. Memverifikasi kapabilitas route...");
+    println!("  Diagnostik opsional route, bukan syarat penggunaan...");
     match ai_service
         .probe_addon_role_with_observer(role, print_probe_event)
         .await
@@ -1963,7 +1944,7 @@ async fn run_cli_probe_test_role(ai_service: &AIChatService, role: ModelRole) {
         Ok((record, status)) => match status {
             ProbeOutcome::Supported => {
                 println!(
-                    "  ✔ Verification passed: Capability works and persistence succeeded (checked: {})",
+                    "  ✔ Observed Supported (checked: {}); see persistence result above",
                     record.checked_at
                 );
             }
@@ -1983,12 +1964,6 @@ async fn run_cli_probe_test_role(ai_service: &AIChatService, role: ModelRole) {
         Err(e) => {
             println!("  ✖ Error / PersistenceFailed: {e}");
         }
-    }
-
-    println!("\n  2. Mengirim payload uji fungsional...");
-    match ai_service.test_model_role(role).await {
-        Ok(detail) => println!("  \x1b[1;32m✔ Sukses:\x1b[0m {detail}"),
-        Err(error) => println!("  \x1b[31m✖ Gagal:\x1b[0m {error}"),
     }
 }
 

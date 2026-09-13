@@ -31,7 +31,7 @@
 | 🛑 **Native Generation Stop** | Tombol stop terintegrasi Bot API 10.3 (`can_stop`, `keep_on_stop`) yang langsung memutus stream OpenAI tanpa latensi. |
 | 🔍 **Web Search & MCP Calling** | AI dapat berselancar mandiri di web dengan 6 tier fallback (Brave ➔ Tavily ➔ Exa ➔ DDG ➔ Wikipedia) serta ekstraktor link URL otomatis. |
 | 🧠 **5-Role Multimodal Routing** | Pemisahan beban kerja mandiri untuk **Main Model**, **Vision**, **Video**, **Audio STT**, dan **Image Generation**. |
-| 🛡️ **Hardened Single-Owner Security** | Verifikasi kepemilikan ketat (`OWNER_USER_ID`), isolasi rahasia (`secret://...`), dan discovery kapabilitas berprinsip *fail-closed*. |
+| 🛡️ **Hardened Single-Owner Security** | Verifikasi kepemilikan ketat (`OWNER_USER_ID`), isolasi rahasia (`secret://...`), sanitasi format media, dan probe kapabilitas opsional sebagai diagnostik non-blocking. |
 | 💾 **Durable SQLite Sessions** | Alokasi ID sesi sekuensial monotonik, isolasi multi-sesi, dan proteksi dari tumpang-tindih respons (*zero cross-session bleed*). |
 | 🖥️ **Interactive Terminal TUI** | Pengelolaan gateway, provider, dan routing model melalui antarmuka visual terminal interaktif (*CLI-First*). |
 
@@ -134,20 +134,17 @@ xiao help           # Panduan lengkap perintah CLI
 
 ## 📱 Perintah Bot Telegram
 
+Antarmuka Telegram didesain ultra-clean sebagai ruang obrolan cerdas dan bebas distraksi tombol teknis. Konfigurasi model, provider, dan routing dikelola terpusat melalui CLI.
+
 | Perintah | Tipe Respons | Deskripsi |
 | :--- | :--- | :--- |
 | *(Teks biasa)* | Streaming Draft | Percakapan reguler dengan Main Model aktif |
 | *(Foto / Media)* | Multimodal | Analisis gambar, audio voice, video, atau dokumen |
 | `/start` | Rich Message | Pesan pembuka dan status ringkas bot |
-| `/menu` | Rich Keyboard | Menu interaktif kontrol cepat |
-| `/model` | Inline Buttons | Ganti Main Model aktif dari whitelist |
-| `/image <prompt>` | Native Photo | Buat gambar baru dari deskripsi teks |
-| `/context` | Rich Table | Tinjau estimasi konsumsi token & limit model |
-| `/session` | Session List | Daftar dan pengalihan sesi percakapan aktif |
-| `/new` | Transaksional | Buat sesi percakapan baru yang bersih |
 | `/clear` | Dialog Konfirmasi | Hapus seluruh riwayat percakapan sesi aktif |
-| `/cancel` | Aksi Batal | Batalkan operasi interaktif yang sedang berjalan |
-| `/help` | Rich Message | Panduan penggunaan bot Telegram |
+| `/new` | Transaksional | Buat sesi percakapan baru yang bersih |
+| `/image <prompt>` | Native Photo | Buat gambar baru dari deskripsi teks |
+| `/help` | Rich Message | Panduan ringkas penggunaan bot Telegram |
 
 ---
 

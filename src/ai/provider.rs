@@ -620,7 +620,7 @@ impl AIChatService {
                 .ok_or_else(|| format!("Provider '{provider_id}' not found"))?;
             if provider.models.is_empty() || !provider.models.iter().any(|entry| entry == model) {
                 return Err(format!(
-                    "Model '{model}' is not present in provider '{}' catalog; refresh/probe the provider first",
+                    "Model '{model}' is not present in provider '{}' catalog; refresh the provider catalog first",
                     provider.name
                 ));
             }
@@ -666,71 +666,6 @@ impl AIChatService {
         record.effective_state_for(capability)
     }
 
-    fn required_capability_state(
-        role: ModelRole,
-        record: &CapabilityRecord,
-        origin: RouteOrigin,
-    ) -> CapabilityState {
-        match role {
-            ModelRole::Main => {
-                let state = Self::effective_capability_state(record, CapabilityKind::TextChat);
-                if state == CapabilityState::Unsupported {
-                    CapabilityState::Unsupported
-                } else {
-                    CapabilityState::Supported
-                }
-            }
-            ModelRole::Vision => {
-                let state = Self::effective_capability_state(record, CapabilityKind::ImageInput);
-                if state == CapabilityState::Unsupported {
-                    CapabilityState::Unsupported
-                } else if state == CapabilityState::Supported || !record.model.is_empty() {
-                    CapabilityState::Supported
-                } else {
-                    CapabilityState::Unknown
-                }
-            }
-            ModelRole::Video => {
-                let state = Self::effective_capability_state(record, CapabilityKind::VideoInput);
-                if state == CapabilityState::Unsupported {
-                    CapabilityState::Unsupported
-                } else if state == CapabilityState::Supported || !record.model.is_empty() {
-                    CapabilityState::Supported
-                } else {
-                    CapabilityState::Unknown
-                }
-            }
-            ModelRole::ImageGeneration => {
-                let state =
-                    Self::effective_capability_state(record, CapabilityKind::ImageGeneration);
-                if state == CapabilityState::Unsupported {
-                    CapabilityState::Unsupported
-                } else {
-                    CapabilityState::Supported
-                }
-            }
-            ModelRole::AudioStt if origin == RouteOrigin::MainModel => {
-                let audio = Self::effective_capability_state(record, CapabilityKind::AudioInput);
-                let stt =
-                    Self::effective_capability_state(record, CapabilityKind::AudioTranscription);
-                if audio == CapabilityState::Unsupported && stt == CapabilityState::Unsupported {
-                    CapabilityState::Unsupported
-                } else {
-                    CapabilityState::Supported
-                }
-            }
-            ModelRole::AudioStt => {
-                let stt =
-                    Self::effective_capability_state(record, CapabilityKind::AudioTranscription);
-                if stt == CapabilityState::Unsupported {
-                    CapabilityState::Unsupported
-                } else {
-                    CapabilityState::Supported
-                }
-            }
-        }
-    }
-
     fn resolve_model_route_unchecked_from_snapshot(
         snapshot: &GenerationModelSnapshot,
         role: ModelRole,
@@ -762,22 +697,7 @@ impl AIChatService {
         snapshot: &GenerationModelSnapshot,
         role: ModelRole,
     ) -> Result<ResolvedModelRoute, String> {
-        let resolved = Self::resolve_model_route_unchecked_from_snapshot(snapshot, role)?;
-        match Self::required_capability_state(role, &resolved.capability, resolved.route_origin) {
-            CapabilityState::Supported => Ok(resolved),
-            CapabilityState::Unsupported => Err(format!(
-                "{} is explicitly Unsupported by {} / {}",
-                role.display_name(),
-                resolved.provider.name,
-                resolved.model
-            )),
-            CapabilityState::Unknown => Err(format!(
-                "{} capability is Unknown or stale for {} / {}; run a capability probe",
-                role.display_name(),
-                resolved.provider.name,
-                resolved.model
-            )),
-        }
+        Self::resolve_model_route_unchecked_from_snapshot(snapshot, role)
     }
 
     pub async fn resolve_model_route_unchecked(
@@ -826,6 +746,7 @@ impl AIChatService {
         true
     }
 
+    #[allow(dead_code)]
     pub async fn get_provider_model_by_index(
         &self,
         _user_id: i64,
@@ -842,6 +763,7 @@ impl AIChatService {
             .cloned()
     }
 
+    #[allow(dead_code)]
     pub async fn set_provider_model(
         &self,
         _user_id: i64,
@@ -1103,6 +1025,7 @@ impl AIChatService {
         classify_probe_http_failure(CapabilityKind::ImageGeneration, status, &body)
     }
 
+    #[allow(dead_code)]
     pub async fn test_model_role(&self, role: ModelRole) -> Result<String, String> {
         if role == ModelRole::Main {
             return Err("Main Model is not an addon route".to_string());
@@ -1789,7 +1712,10 @@ impl AIChatService {
             ModelRole::Main => CapabilityKind::TextChat,
             ModelRole::Vision => CapabilityKind::ImageInput,
             ModelRole::Video => CapabilityKind::VideoInput,
-            ModelRole::AudioStt => CapabilityKind::AudioInput,
+            ModelRole::AudioStt if route.route_origin == RouteOrigin::MainModel => {
+                CapabilityKind::AudioInput
+            }
+            ModelRole::AudioStt => CapabilityKind::AudioTranscription,
             ModelRole::ImageGeneration => CapabilityKind::ImageGeneration,
         };
         let outcome = match record.effective_state_for(kind) {
@@ -2247,54 +2173,66 @@ mod tests {
     }
 
     #[test]
-    fn main_audio_route_accepts_fresh_native_audio_or_stt_and_rejects_neither() {
-        fn audio_record(native: CapabilityState, stt: CapabilityState) -> CapabilityRecord {
-            let now = chrono::Utc::now().to_rfc3339();
-            CapabilityRecord {
-                evidence: vec![
-                    CapabilityEvidence {
-                        capability: CapabilityKind::AudioInput,
-                        source: CapabilityEvidenceSource::ActiveProbe,
-                        outcome: native,
-                        checked_at: now.clone(),
-                        detail: None,
-                    },
-                    CapabilityEvidence {
-                        capability: CapabilityKind::AudioTranscription,
-                        source: CapabilityEvidenceSource::ActiveProbe,
-                        outcome: stt,
-                        checked_at: now,
-                        detail: None,
-                    },
-                ],
-                ..CapabilityRecord::default()
+    fn configured_routes_ignore_diagnostic_evidence() {
+        let provider = provider("main", "model");
+        for state in [
+            CapabilityState::Unknown,
+            CapabilityState::Supported,
+            CapabilityState::Unsupported,
+        ] {
+            for age in [chrono::Duration::zero(), chrono::Duration::days(90)] {
+                let mut record = supported_record(&provider, "model");
+                for evidence in &mut record.evidence {
+                    evidence.outcome = state;
+                    evidence.checked_at = (chrono::Utc::now() - age).to_rfc3339();
+                }
+                for records in [vec![], vec![record.clone()]] {
+                    let mut snapshot = GenerationModelSnapshot {
+                        provider_store: ProviderStore {
+                            active_id: Some(provider.id.clone()),
+                            providers: vec![provider.clone()],
+                            telegram_models: vec![],
+                        },
+                        routing: ModelRoutingConfig::default(),
+                        capabilities: CapabilityRegistry { models: records },
+                    };
+                    for role in [ModelRole::Main]
+                        .into_iter()
+                        .chain(ModelRole::addon_roles())
+                    {
+                        let resolved =
+                            AIChatService::resolve_model_route_from_snapshot(&snapshot, role)
+                                .unwrap();
+                        assert_eq!(resolved.model, "model");
+                        assert_eq!(resolved.provider.endpoint, provider.endpoint);
+                        if role != ModelRole::Main {
+                            snapshot
+                                .routing
+                                .set_route(role, ModelRoute::Disabled)
+                                .unwrap();
+                            assert!(AIChatService::resolve_model_route_from_snapshot(
+                                &snapshot, role,
+                            )
+                            .is_err());
+                            snapshot
+                                .routing
+                                .set_route(
+                                    role,
+                                    ModelRoute::Specific {
+                                        provider_id: provider.id.clone(),
+                                        model: "model".into(),
+                                    },
+                                )
+                                .unwrap();
+                            assert!(AIChatService::resolve_model_route_from_snapshot(
+                                &snapshot, role,
+                            )
+                            .is_ok());
+                        }
+                    }
+                }
             }
         }
-
-        assert_eq!(
-            AIChatService::required_capability_state(
-                ModelRole::AudioStt,
-                &audio_record(CapabilityState::Supported, CapabilityState::Unknown),
-                RouteOrigin::MainModel
-            ),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            AIChatService::required_capability_state(
-                ModelRole::AudioStt,
-                &audio_record(CapabilityState::Unsupported, CapabilityState::Supported),
-                RouteOrigin::MainModel
-            ),
-            CapabilityState::Supported
-        );
-        assert_eq!(
-            AIChatService::required_capability_state(
-                ModelRole::AudioStt,
-                &audio_record(CapabilityState::Unsupported, CapabilityState::Unsupported),
-                RouteOrigin::MainModel
-            ),
-            CapabilityState::Unsupported
-        );
     }
 
     #[test]

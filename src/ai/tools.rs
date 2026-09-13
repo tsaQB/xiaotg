@@ -147,7 +147,11 @@ pub async fn execute_web_search(query: &str) -> String {
     }
 }
 
-async fn search_brave(client: &reqwest::Client, api_key: &str, query: &str) -> Result<String, String> {
+async fn search_brave(
+    client: &reqwest::Client,
+    api_key: &str,
+    query: &str,
+) -> Result<String, String> {
     let url = format!(
         "https://api.search.brave.com/res/v1/web/search?q={}&count=5",
         urlencoding::encode(query)
@@ -178,9 +182,15 @@ async fn search_brave(client: &reqwest::Client, api_key: &str, query: &str) -> R
         .and_then(Value::as_array)
     {
         for (i, item) in results.iter().take(5).enumerate() {
-            let title = item.get("title").and_then(Value::as_str).unwrap_or("Tanpa Judul");
+            let title = item
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Tanpa Judul");
             let url = item.get("url").and_then(Value::as_str).unwrap_or("");
-            let desc = item.get("description").and_then(Value::as_str).unwrap_or("");
+            let desc = item
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             out.push_str(&format!(
                 "{}. **{}**\n   URL: {}\n   Ringkasan: {}\n\n",
                 i + 1,
@@ -192,13 +202,23 @@ async fn search_brave(client: &reqwest::Client, api_key: &str, query: &str) -> R
     }
 
     if out.trim().is_empty() {
-        Ok(format!("Tidak ada hasil ditemukan di Brave untuk query \"{query}\"."))
+        Ok(format!(
+            "Tidak ada hasil ditemukan di Brave untuk query \"{query}\"."
+        ))
     } else {
-        Ok(format!("[Hasil Pencarian Brave untuk \"{query}\"]\n\n{out}").trim().to_string())
+        Ok(
+            format!("[Hasil Pencarian Brave untuk \"{query}\"]\n\n{out}")
+                .trim()
+                .to_string(),
+        )
     }
 }
 
-async fn search_tavily(client: &reqwest::Client, api_key: &str, query: &str) -> Result<String, String> {
+async fn search_tavily(
+    client: &reqwest::Client,
+    api_key: &str,
+    query: &str,
+) -> Result<String, String> {
     let resp = client
         .post("https://api.tavily.com/search")
         .json(&json!({
@@ -223,13 +243,20 @@ async fn search_tavily(client: &reqwest::Client, api_key: &str, query: &str) -> 
         .map_err(|e| format!("Gagal membaca JSON Tavily: {e}"))?;
 
     let mut out = String::new();
-    if let Some(answer) = body.get("answer").and_then(Value::as_str).filter(|a| !a.is_empty()) {
+    if let Some(answer) = body
+        .get("answer")
+        .and_then(Value::as_str)
+        .filter(|a| !a.is_empty())
+    {
         out.push_str(&format!("💡 **Jawaban Ringkas**: {}\n\n", answer));
     }
 
     if let Some(results) = body.get("results").and_then(Value::as_array) {
         for (i, item) in results.iter().take(5).enumerate() {
-            let title = item.get("title").and_then(Value::as_str).unwrap_or("Tanpa Judul");
+            let title = item
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Tanpa Judul");
             let url = item.get("url").and_then(Value::as_str).unwrap_or("");
             let content = item.get("content").and_then(Value::as_str).unwrap_or("");
             out.push_str(&format!(
@@ -243,13 +270,23 @@ async fn search_tavily(client: &reqwest::Client, api_key: &str, query: &str) -> 
     }
 
     if out.trim().is_empty() {
-        Ok(format!("Tidak ada hasil ditemukan di Tavily untuk query \"{query}\"."))
+        Ok(format!(
+            "Tidak ada hasil ditemukan di Tavily untuk query \"{query}\"."
+        ))
     } else {
-        Ok(format!("[Hasil Pencarian Tavily untuk \"{query}\"]\n\n{out}").trim().to_string())
+        Ok(
+            format!("[Hasil Pencarian Tavily untuk \"{query}\"]\n\n{out}")
+                .trim()
+                .to_string(),
+        )
     }
 }
 
-async fn search_exa_api(client: &reqwest::Client, api_key: &str, query: &str) -> Result<String, String> {
+async fn search_exa_api(
+    client: &reqwest::Client,
+    api_key: &str,
+    query: &str,
+) -> Result<String, String> {
     let resp = client
         .post("https://api.exa.ai/search")
         .header("x-api-key", api_key)
@@ -276,7 +313,10 @@ async fn search_exa_api(client: &reqwest::Client, api_key: &str, query: &str) ->
     let mut out = String::new();
     if let Some(results) = body.get("results").and_then(Value::as_array) {
         for (i, item) in results.iter().take(5).enumerate() {
-            let title = item.get("title").and_then(Value::as_str).unwrap_or("Tanpa Judul");
+            let title = item
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Tanpa Judul");
             let url = item.get("url").and_then(Value::as_str).unwrap_or("");
             let highlight = item
                 .get("highlights")
@@ -296,13 +336,23 @@ async fn search_exa_api(client: &reqwest::Client, api_key: &str, query: &str) ->
     }
 
     if out.trim().is_empty() {
-        Ok(format!("Tidak ada hasil ditemukan di Exa untuk query \"{query}\"."))
+        Ok(format!(
+            "Tidak ada hasil ditemukan di Exa untuk query \"{query}\"."
+        ))
     } else {
-        Ok(format!("[Hasil Pencarian Exa AI untuk \"{query}\"]\n\n{out}").trim().to_string())
+        Ok(
+            format!("[Hasil Pencarian Exa AI untuk \"{query}\"]\n\n{out}")
+                .trim()
+                .to_string(),
+        )
     }
 }
 
-async fn search_exa_mcp(client: &reqwest::Client, mcp_url: &str, query: &str) -> Result<String, String> {
+async fn search_exa_mcp(
+    client: &reqwest::Client,
+    mcp_url: &str,
+    query: &str,
+) -> Result<String, String> {
     let resp = client
         .post(mcp_url)
         .header(ACCEPT, "application/json, text/event-stream")
@@ -373,7 +423,11 @@ async fn search_exa_mcp(client: &reqwest::Client, mcp_url: &str, query: &str) ->
     if parsed_text.trim().is_empty() {
         Err("Exa MCP tidak mengembalikan konten yang valid.".to_string())
     } else {
-        Ok(format!("[Hasil Pencarian Exa AI untuk \"{query}\"]\n\n{parsed_text}").trim().to_string())
+        Ok(
+            format!("[Hasil Pencarian Exa AI untuk \"{query}\"]\n\n{parsed_text}")
+                .trim()
+                .to_string(),
+        )
     }
 }
 
@@ -443,7 +497,9 @@ async fn search_duckduckgo(client: &reqwest::Client, query: &str) -> Result<Stri
     if out.trim().is_empty() {
         Err("Tidak ditemukan hasil pencarian".to_string())
     } else {
-        Ok(format!("[Hasil Pencarian Web untuk \"{query}\"]\n\n{out}").trim().to_string())
+        Ok(format!("[Hasil Pencarian Web untuk \"{query}\"]\n\n{out}")
+            .trim()
+            .to_string())
     }
 }
 
@@ -498,9 +554,15 @@ async fn search_wikipedia(client: &reqwest::Client, query: &str) -> Result<Strin
     }
 
     if out.trim().is_empty() {
-        Err(format!("Tidak ada hasil ditemukan di ensiklopedia untuk query: \"{query}\""))
+        Err(format!(
+            "Tidak ada hasil ditemukan di ensiklopedia untuk query: \"{query}\""
+        ))
     } else {
-        Ok(format!("[Hasil Informasi Ensiklopedia Web untuk \"{query}\"]\n\n{out}").trim().to_string())
+        Ok(
+            format!("[Hasil Informasi Ensiklopedia Web untuk \"{query}\"]\n\n{out}")
+                .trim()
+                .to_string(),
+        )
     }
 }
 
@@ -538,9 +600,15 @@ pub async fn fetch_web_content(url: &str) -> Result<String, String> {
         .map_err(|e| format!("Gagal membaca konten web: {e}"))?;
 
     // Clean scripts, styles, and html tags
-    let no_script = Regex::new(r"(?is)<script.*?</script>").unwrap().replace_all(&html, "");
-    let no_style = Regex::new(r"(?is)<style.*?</style>").unwrap().replace_all(&no_script, "");
-    let no_head = Regex::new(r"(?is)<head.*?</head>").unwrap().replace_all(&no_style, "");
+    let no_script = Regex::new(r"(?is)<script.*?</script>")
+        .unwrap()
+        .replace_all(&html, "");
+    let no_style = Regex::new(r"(?is)<style.*?</style>")
+        .unwrap()
+        .replace_all(&no_script, "");
+    let no_head = Regex::new(r"(?is)<head.*?</head>")
+        .unwrap()
+        .replace_all(&no_style, "");
     let no_tags = Regex::new(r"<[^>]+>").unwrap().replace_all(&no_head, " ");
     let decoded = html_escape::decode_html_entities(&no_tags);
 
@@ -592,9 +660,15 @@ mod tests {
     #[test]
     fn test_html_cleaning_logic() {
         let raw_html = "<html><head><style>body{color:red;}</style></head><body><h1>Hello &amp; Welcome</h1><script>alert(1);</script><p>This is a test.</p></body></html>";
-        let no_script = Regex::new(r"(?is)<script.*?</script>").unwrap().replace_all(raw_html, "");
-        let no_style = Regex::new(r"(?is)<style.*?</style>").unwrap().replace_all(&no_script, "");
-        let no_head = Regex::new(r"(?is)<head.*?</head>").unwrap().replace_all(&no_style, "");
+        let no_script = Regex::new(r"(?is)<script.*?</script>")
+            .unwrap()
+            .replace_all(raw_html, "");
+        let no_style = Regex::new(r"(?is)<style.*?</style>")
+            .unwrap()
+            .replace_all(&no_script, "");
+        let no_head = Regex::new(r"(?is)<head.*?</head>")
+            .unwrap()
+            .replace_all(&no_style, "");
         let no_tags = Regex::new(r"<[^>]+>").unwrap().replace_all(&no_head, " ");
         let decoded = html_escape::decode_html_entities(&no_tags);
         let re_space = Regex::new(r"\s+").unwrap();

@@ -1150,16 +1150,16 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
     blocks
 }
 
-pub fn build_full_rich_message(answer_text: &str, model_name: Option<&str>) -> InputRichMessage {
+pub fn build_full_rich_message(answer_text: &str, footer_text: Option<&str>) -> InputRichMessage {
     let mut blocks = parse_markdown_to_rich_blocks(answer_text);
     if blocks.is_empty() {
         blocks.push(RichBlock::Paragraph {
             text: parse_inline(answer_text.trim()),
         });
     }
-    if let Some(model) = model_name.map(str::trim).filter(|m| !m.is_empty()) {
+    if let Some(footer) = footer_text.map(str::trim).filter(|m| !m.is_empty()) {
         blocks.push(RichBlock::Footer {
-            text: parse_inline(&format!("⚡ {model}")),
+            text: parse_inline(footer),
         });
     }
     InputRichMessage::new(blocks)
@@ -1309,11 +1309,19 @@ Paragraf normal";
             .iter()
             .any(|b| matches!(b, RichBlock::PullQuotation { .. })));
 
-        let full = build_full_rich_message("Jawaban AI", Some("openai/gpt-4o"));
-        assert!(full
+        let full = build_full_rich_message("Jawaban AI", Some("`⚡ 3.0s`"));
+        let footer = full
             .blocks
             .iter()
-            .any(|b| matches!(b, RichBlock::Footer { .. })));
+            .find_map(|b| match b {
+                RichBlock::Footer { text } => Some(text),
+                _ => None,
+            })
+            .expect("footer block should exist");
+        let serialized = serde_json::to_string(footer).unwrap();
+        assert!(serialized.contains("3.0s"));
+        assert!(serialized.contains("⚡"));
+        assert!(serialized.contains("code"));
     }
 
     #[test]
