@@ -1059,24 +1059,35 @@ impl TelegramBotClient {
 
     pub async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<Value, String> {
         let delivery = Self::current_delivery_context();
-        if let Some((receiver_user_id, ephemeral_message_id)) = delivery
-            .receiver_user_id
-            .zip(delivery.source_ephemeral_message_id)
-        {
-            return self
-                .post_json(
-                    "deleteEphemeralMessage",
-                    json!({
-                        "chat_id": chat_id,
-                        "receiver_user_id": receiver_user_id,
-                        "ephemeral_message_id": ephemeral_message_id,
-                    }),
-                )
-                .await;
+        if let Some(receiver_user_id) = delivery.receiver_user_id {
+            if let Some(source_id) = delivery.source_ephemeral_message_id {
+                if message_id == source_id {
+                    return self
+                        .delete_ephemeral_message(chat_id, receiver_user_id, source_id)
+                        .await;
+                }
+            }
         }
         self.post_json(
             "deleteMessage",
             json!({"chat_id": chat_id, "message_id": message_id}),
+        )
+        .await
+    }
+
+    pub async fn delete_ephemeral_message(
+        &self,
+        chat_id: i64,
+        receiver_user_id: i64,
+        ephemeral_message_id: i64,
+    ) -> Result<Value, String> {
+        self.post_json(
+            "deleteEphemeralMessage",
+            json!({
+                "chat_id": chat_id,
+                "receiver_user_id": receiver_user_id,
+                "ephemeral_message_id": ephemeral_message_id,
+            }),
         )
         .await
     }

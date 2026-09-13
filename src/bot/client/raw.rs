@@ -1343,26 +1343,34 @@ impl TelegramBotClient {
 
     pub async fn delete_message(&self, chat_id: i64, message_id: i64) -> Result<Value, String> {
         let delivery = Self::current_delivery_context();
-        if let Some((receiver_user_id, ephemeral_message_id)) = delivery
-            .receiver_user_id
-            .zip(delivery.source_ephemeral_message_id)
-        {
-            return self
-                .post_json(
-                    "deleteEphemeralMessage",
-                    json!({
-                        "chat_id": chat_id,
-                        "receiver_user_id": receiver_user_id,
-                        "ephemeral_message_id": ephemeral_message_id,
-                    }),
-                )
-                .await;
+        if let Some(receiver_user_id) = delivery.receiver_user_id {
+            if let Some(source_id) = delivery.source_ephemeral_message_id {
+                if message_id == source_id {
+                    return self
+                        .delete_ephemeral_message(chat_id, receiver_user_id, source_id)
+                        .await;
+                }
+            }
         }
         let payload = json!({
             "chat_id": chat_id,
             "message_id": message_id,
         });
         self.post_json("deleteMessage", payload).await
+    }
+
+    pub async fn delete_ephemeral_message(
+        &self,
+        chat_id: i64,
+        receiver_user_id: i64,
+        ephemeral_message_id: i64,
+    ) -> Result<Value, String> {
+        let payload = json!({
+            "chat_id": chat_id,
+            "receiver_user_id": receiver_user_id,
+            "ephemeral_message_id": ephemeral_message_id,
+        });
+        self.post_json("deleteEphemeralMessage", payload).await
     }
 
     pub async fn answer_callback_query(
@@ -1778,8 +1786,22 @@ impl TelegramBotClient {
             RichBlock::Divider {} => "────────────────────────".to_string(),
             RichBlock::MathematicalExpression { expression } => expression.clone(),
             RichBlock::Table {
-                cells, has_header, ..
-            } => self.render_table_to_ascii(cells, *has_header),
+                cells,
+                has_header,
+                caption,
+                ..
+            } => {
+                let ascii = self.render_table_to_ascii(cells, *has_header);
+                if let Some(cap) = caption {
+                    if !ascii.is_empty() {
+                        format!("{cap}\n{ascii}")
+                    } else {
+                        cap.clone()
+                    }
+                } else {
+                    ascii
+                }
+            }
             RichBlock::Buttons { buttons, .. } => buttons
                 .iter()
                 .map(|button| self.rich_value_to_plain(&button.text))
@@ -2007,15 +2029,28 @@ impl TelegramBotClient {
                 )
             }
             RichBlock::Table {
-                cells, has_header, ..
+                cells,
+                has_header,
+                caption,
+                ..
             } => {
                 let ascii_tbl = self.render_table_to_ascii(cells, *has_header);
                 if !ascii_tbl.is_empty() {
-                    format!(
-                        "
+                    if let Some(cap) = caption {
+                        let safe_cap = html_escape::encode_text(cap);
+                        format!(
+                            "
+<b>{safe_cap}</b>
 {ascii_tbl}
 "
-                    )
+                        )
+                    } else {
+                        format!(
+                            "
+{ascii_tbl}
+"
+                        )
+                    }
                 } else {
                     String::new()
                 }
@@ -2043,7 +2078,7 @@ impl TelegramBotClient {
                     .and_then(Value::as_str)
                     .or_else(|| document.as_str())
                     .unwrap_or_default();
-                if !media.is_empty() && !media.starts_with("tg://") {
+                if !media.is_empty() {
                     let safe_url = html_escape::encode_double_quoted_attribute(media);
                     format!("📄 <b><a href=\"{safe_url}\">{name}</a></b>\n")
                 } else {
@@ -2269,7 +2304,8 @@ impl TelegramBotClient {
                         let safe_url = html_escape::encode_double_quoted_attribute(url);
                         format!("<a href=\"{safe_url}\">{inner}</a>")
                     }
-                    "strike" => format!("<s>{inner}</s>"),
+                    "spoiler" => format!("<tg-spoiler>{inner}</tg-spoiler>"),
+                    "strikethrough" | "strike" => format!("<s>{inner}</s>"),
                     "underline" => format!("<u>{inner}</u>"),
                     "paragraph" => inner,
                     _ => inner,

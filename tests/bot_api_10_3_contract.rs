@@ -158,3 +158,43 @@ fn raw_media_downloader_enforces_safe_outbound_url_policy() {
         "external media fallback must not let ambient proxies bypass DNS pinning"
     );
 }
+
+#[test]
+fn parsed_expandable_blockquote_serializes_with_10_3_discriminator() {
+    let blocks = parser::parse_markdown_to_rich_blocks("**> Catatan penting yang dapat dilipat");
+    let Some(RichBlock::ExpandableBlockQuotation { .. }) = blocks.first() else {
+        panic!("expected expandable blockquote");
+    };
+    let rich_message = models::InputRichMessage::new(blocks);
+    assert!(rich_message.validate().is_ok());
+    let value = serde_json::to_value(&rich_message).expect("should serialize rich message");
+    assert_eq!(value["blocks"][0]["type"], "expandable_blockquote");
+    assert_eq!(
+        value["blocks"][0]["text"],
+        "Catatan penting yang dapat dilipat"
+    );
+}
+
+#[test]
+fn parsed_rich_inline_spoiler_and_strikethrough_serialize() {
+    let blocks = parser::parse_markdown_to_rich_blocks("Hasil: ||jawaban rahasia|| dan ~~coret~~");
+    let rich_message = models::InputRichMessage::new(blocks);
+    assert!(rich_message.validate().is_ok());
+    let value = serde_json::to_value(&rich_message).expect("should serialize rich message");
+    let serialized = value.to_string();
+    assert!(serialized.contains(r#""type":"spoiler""#));
+    assert!(serialized.contains(r#""type":"strikethrough""#));
+}
+
+#[test]
+fn raw_client_exposes_explicit_delete_ephemeral_message() {
+    let source = include_str!("../src/bot/client/raw.rs");
+    assert!(
+        source.contains("pub async fn delete_ephemeral_message("),
+        "raw client must provide explicit delete_ephemeral_message API"
+    );
+    assert!(
+        source.contains("\"deleteEphemeralMessage\""),
+        "raw client must target Telegram deleteEphemeralMessage method"
+    );
+}

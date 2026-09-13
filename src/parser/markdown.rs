@@ -10,11 +10,33 @@ pub fn parse_inline(input_str: &str) -> Value {
         return Value::String(String::new());
     }
 
+    // Normalize well-formed inline HTML tags before cleaning leaked residual HTML
+    let mut normalized = input_str.to_string();
+    if normalized.contains("spoiler") || normalized.contains("<tg-spoiler") {
+        if let Ok(re) = Regex::new(r"(?is)<tg-spoiler(?:\s+[^>]*)?>(.*?)</tg-spoiler>") {
+            normalized = re.replace_all(&normalized, "||$1||").into_owned();
+        }
+        if let Ok(re) = Regex::new(r#"(?is)<span\s+class=["']?(?:tg-)?spoiler["']?>(.*?)</span>"#) {
+            normalized = re.replace_all(&normalized, "||$1||").into_owned();
+        }
+    }
+    if normalized.contains("<s") || normalized.contains("<strike") || normalized.contains("<del") {
+        if let Ok(re) = Regex::new(r"(?is)<(?:s|strike|del)(?:\s+[^>]*)?>(.*?)</(?:s|strike|del)>")
+        {
+            normalized = re.replace_all(&normalized, "~~$1~~").into_owned();
+        }
+    }
+    if normalized.contains("<u") || normalized.contains("<ins") {
+        if let Ok(re) = Regex::new(r"(?is)<(?:u|ins)(?:\s+[^>]*)?>(.*?)</(?:u|ins)>") {
+            normalized = re.replace_all(&normalized, "++${1}++").into_owned();
+        }
+    }
+
     // Clean leaked HTML tags
     let cleaned =
         Regex::new(r"(?i)</?(?:b|i|s|u|code|pre|blockquote|a|tg-spoiler|span|p|div)(?:\s+[^>]*)?>")
-            .map(|regex| regex.replace_all(input_str, "").into_owned())
-            .unwrap_or_else(|_| input_str.to_string());
+            .map(|regex| regex.replace_all(&normalized, "").into_owned())
+            .unwrap_or_else(|_| normalized);
     let unescaped = html_escape::decode_html_entities(&cleaned).to_string();
 
     let mut out: Vec<Value> = Vec::new();
@@ -34,12 +56,51 @@ pub fn parse_inline(input_str: &str) -> Value {
             }
         }
 
+        // 2c. Underline <u>text</u> (++text++)
+        if rest.starts_with("++") {
+            if let Some(end) = rest[2..].find("++") {
+                let inner = &rest[2..2 + end];
+                out.push(json!({
+                    "type": "underline",
+                    "text": parse_inline(inner)
+                }));
+                rest = &rest[2 + end + 2..];
+                continue;
+            }
+        }
+
         // 2. Bold __text__
         if rest.starts_with("__") {
             if let Some(end) = rest[2..].find("__") {
                 let inner = &rest[2..2 + end];
                 out.push(json!({
                     "type": "bold",
+                    "text": parse_inline(inner)
+                }));
+                rest = &rest[2 + end + 2..];
+                continue;
+            }
+        }
+
+        // 2a. Spoiler ||text||
+        if rest.starts_with("||") {
+            if let Some(end) = rest[2..].find("||") {
+                let inner = &rest[2..2 + end];
+                out.push(json!({
+                    "type": "spoiler",
+                    "text": parse_inline(inner)
+                }));
+                rest = &rest[2 + end + 2..];
+                continue;
+            }
+        }
+
+        // 2b. Strikethrough ~~text~~
+        if rest.starts_with("~~") {
+            if let Some(end) = rest[2..].find("~~") {
+                let inner = &rest[2..2 + end];
+                out.push(json!({
+                    "type": "strikethrough",
                     "text": parse_inline(inner)
                 }));
                 rest = &rest[2 + end + 2..];
@@ -95,7 +156,10 @@ pub fn parse_inline(input_str: &str) -> Value {
             if let Some(close) = rest.find("](") {
                 if let Some(end) = rest[close + 2..].find(')') {
                     let url = &rest[close + 2..close + 2 + end];
-                    if url.starts_with("https://") || url.starts_with("http://") {
+                    if url.starts_with("https://")
+                        || url.starts_with("http://")
+                        || url.starts_with("tg://")
+                    {
                         let inner = &rest[1..close];
                         out.push(json!({
                             "type": "url",
@@ -143,7 +207,7 @@ pub fn parse_inline(input_str: &str) -> Value {
 
         // 9. Plain text chunk until next token
         let mut next_pos = rest.len();
-        for delim in &["**", "__", "`", "*", "_", "[", "$", r"\("] {
+        for delim in &["**", "__", "||", "~~", "++", "`", "*", "_", "[", "$", r"\("] {
             if let Some(idx) = rest.find(delim) {
                 if idx > 0 && idx < next_pos {
                     next_pos = idx;
@@ -258,6 +322,37 @@ fn try_parse_doc_block(line: &str) -> Option<RichBlock> {
     let s = line.trim();
     if let Some(rest) = s.strip_prefix("[document:") {
         if let Some((name, link)) = split_bracket_and_parenthesis(rest) {
+            return Some(RichBlock::Document {
+                document: json!({"type": "document", "media": link}),
+                caption: (!name.is_empty()).then(|| RichBlockCaption::new(parse_inline(name))),
+            });
+        }
+    }
+    if let Some(rest) = s.strip_prefix("<tg-document") {
+        let trimmed = rest.trim().trim_end_matches('>').trim_end_matches('/');
+        let link = trimmed
+            .split("src=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .or_else(|| {
+                trimmed
+                    .split("src='")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+            })
+            .unwrap_or("");
+        let name = trimmed
+            .split("name=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .or_else(|| {
+                trimmed
+                    .split("name='")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+            })
+            .unwrap_or("");
+        if !link.is_empty() {
             return Some(RichBlock::Document {
                 document: json!({"type": "document", "media": link}),
                 caption: (!name.is_empty()).then(|| RichBlockCaption::new(parse_inline(name))),
@@ -626,6 +721,46 @@ fn try_parse_table(
     (None, false, i)
 }
 
+fn extract_html_cite(text: &str) -> (String, Option<String>) {
+    if let Some(start) = text.find("<cite>") {
+        if let Some(end) = text[start + 6..].find("</cite>") {
+            let credit = text[start + 6..start + 6 + end].trim().to_string();
+            let mut body = text[..start].to_string();
+            body.push_str(&text[start + 6 + end + 7..]);
+            let credit_opt = if credit.is_empty() {
+                None
+            } else {
+                Some(credit)
+            };
+            return (body.trim().to_string(), credit_opt);
+        }
+    }
+    (text.to_string(), None)
+}
+
+fn extract_quote_credit(lines: &[String]) -> (String, Option<String>) {
+    let combined = lines.join("\n");
+    let (body, cite) = extract_html_cite(&combined);
+    if cite.is_some() {
+        return (body, cite);
+    }
+    if lines.len() > 1 {
+        if let Some(last) = lines.last() {
+            let trimmed = last.trim();
+            for prefix in &["— ", "– ", "-- "] {
+                if let Some(credit) = trimmed.strip_prefix(prefix) {
+                    let credit = credit.trim();
+                    if !credit.is_empty() {
+                        let text = lines[..lines.len() - 1].join("\n");
+                        return (text, Some(credit.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    (combined, None)
+}
+
 /// Parse an accumulated streaming Markdown buffer without exposing syntax that
 /// is still provisional. Completed syntax is rendered through the canonical
 /// Rich Message parser; an incomplete tail is reduced to safe semantic text.
@@ -673,7 +808,7 @@ fn provisional_markdown_start(text: &str) -> Option<usize> {
     // Inline code and emphasis are deliberately conservative: if a delimiter
     // is unmatched, the entire construct remains provisional rather than
     // flashing the raw opener to Telegram.
-    for marker in ["**", "__", "`"] {
+    for marker in ["**", "__", "`", "||", "~~", "++"] {
         let mut open: Option<usize> = None;
         let mut cursor = 0usize;
         while let Some(relative) = text[cursor..].find(marker) {
@@ -728,7 +863,11 @@ fn provisional_markdown_start(text: &str) -> Option<usize> {
     let marker = current_line.trim();
     let incomplete_heading =
         !marker.is_empty() && marker.chars().all(|ch| ch == '#') && marker.chars().count() <= 6;
-    let incomplete_divider = matches!(marker, "-" | "--" | "*" | "**" | "_" | "__");
+    let incomplete_divider = matches!(
+        marker,
+        "-" | "--" | "*" | "**" | "_" | "__" | "|" | "||" | "~" | "~~"
+    );
+    let incomplete_quote = matches!(marker, ">" | "**>" | ">>" | ">>>");
     let numeric_list_prefix = marker
         .strip_suffix('.')
         .or_else(|| marker.strip_suffix(')'));
@@ -737,7 +876,7 @@ fn provisional_markdown_start(text: &str) -> Option<usize> {
         || numeric_list_prefix.is_some_and(|prefix| {
             !prefix.is_empty() && prefix.chars().all(|ch| ch.is_ascii_digit())
         });
-    if incomplete_heading || incomplete_divider || incomplete_list {
+    if incomplete_heading || incomplete_divider || incomplete_list || incomplete_quote {
         openings.push(marker_start);
     }
 
@@ -768,7 +907,13 @@ fn provisional_markdown_start(text: &str) -> Option<usize> {
 }
 
 fn sanitize_provisional_markdown(tail: &str) -> String {
-    let mut safe = tail.replace("```", "").replace("**", "").replace("__", "");
+    let mut safe = tail
+        .replace("```", "")
+        .replace("**", "")
+        .replace("__", "")
+        .replace("||", "")
+        .replace("~~", "")
+        .replace("++", "");
     safe = safe.replace('`', "");
 
     // These are static programmer-owned patterns, but draft rendering must not
@@ -785,12 +930,15 @@ fn sanitize_provisional_markdown(tail: &str) -> String {
     if let Ok(re) = Regex::new(r"(?m)^\s*(?:-{1,}|\*{3,}|_{3,})\s*$") {
         safe = re.replace_all(&safe, "").into_owned();
     }
+    if let Ok(re) = Regex::new(r"(?m)^\s*(?:\*\*>|>>>|>)\s*") {
+        safe = re.replace_all(&safe, "").into_owned();
+    }
 
     // Remove only obvious unmatched edge delimiters; do not blanket-delete
     // underscores from identifiers or ordinary punctuation.
     let trimmed = safe
-        .trim_start_matches(['_', '*', '['])
-        .trim_end_matches(['_', '*', '[', ']']);
+        .trim_start_matches(['_', '*', '[', '|', '~', '>'])
+        .trim_end_matches(['_', '*', '[', ']', '|', '~', '>']);
     trimmed.to_string()
 }
 
@@ -1000,12 +1148,130 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
                 quote_lines.push(stripped_q.to_string());
                 i += 1;
             }
+            let (quote_text, credit) = extract_quote_credit(&quote_lines);
             blocks.push(RichBlock::PullQuotation {
-                text: parse_inline(&quote_lines.join(
-                    "
-",
-                )),
-                credit: None,
+                text: parse_inline(&quote_text),
+                credit: credit.map(|c| parse_inline(&c)),
+            });
+            continue;
+        }
+
+        // 6b. Expandable Blockquote (**> quote or <blockquote expandable>)
+        if stripped.starts_with("**>") {
+            let mut quote_lines = Vec::new();
+            while i < n {
+                let curr_stripped = lines[i].trim();
+                if curr_stripped.starts_with("**>") {
+                    quote_lines.push(
+                        curr_stripped
+                            .strip_prefix("**>")
+                            .unwrap_or(curr_stripped)
+                            .trim_start()
+                            .to_string(),
+                    );
+                    i += 1;
+                } else if curr_stripped.starts_with('>') && !curr_stripped.starts_with(">>>") {
+                    quote_lines.push(
+                        curr_stripped
+                            .strip_prefix('>')
+                            .unwrap_or(curr_stripped)
+                            .trim_start()
+                            .to_string(),
+                    );
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let (quote_text, credit) = extract_quote_credit(&quote_lines);
+            blocks.push(RichBlock::ExpandableBlockQuotation {
+                text: parse_inline(&quote_text),
+                credit: credit.map(|c| parse_inline(&c)),
+            });
+            continue;
+        }
+
+        if stripped.starts_with("<blockquote") && stripped.contains("expandable") {
+            let mut quote_lines = Vec::new();
+            let mut first_line = stripped.to_string();
+            if let Some(pos) = first_line.find('>') {
+                first_line = first_line[pos + 1..].to_string();
+            }
+            if let Some(end) = first_line.find("</blockquote>") {
+                let inner = first_line[..end].trim();
+                let (quote_text, credit) = extract_html_cite(inner);
+                blocks.push(RichBlock::ExpandableBlockQuotation {
+                    text: parse_inline(&quote_text),
+                    credit: credit.map(|c| parse_inline(&c)),
+                });
+                i += 1;
+                continue;
+            }
+            if !first_line.trim().is_empty() {
+                quote_lines.push(first_line.trim().to_string());
+            }
+            i += 1;
+            while i < n {
+                let curr = lines[i].trim();
+                if let Some(end) = curr.find("</blockquote>") {
+                    let before = curr[..end].trim();
+                    if !before.is_empty() {
+                        quote_lines.push(before.to_string());
+                    }
+                    i += 1;
+                    break;
+                }
+                quote_lines.push(curr.to_string());
+                i += 1;
+            }
+            let (quote_text, credit) = extract_quote_credit(&quote_lines);
+            blocks.push(RichBlock::ExpandableBlockQuotation {
+                text: parse_inline(&quote_text),
+                credit: credit.map(|c| parse_inline(&c)),
+            });
+            continue;
+        }
+
+        // 6c. HTML Blockquote (<blockquote> ... </blockquote>)
+        if stripped.starts_with("<blockquote") && !stripped.contains("expandable") {
+            let mut quote_lines = Vec::new();
+            let mut first_line = stripped.to_string();
+            if let Some(pos) = first_line.find('>') {
+                first_line = first_line[pos + 1..].to_string();
+            }
+            if let Some(end) = first_line.find("</blockquote>") {
+                let inner = first_line[..end].trim();
+                blocks.push(RichBlock::BlockQuotation {
+                    blocks: vec![json!({
+                        "type": "paragraph",
+                        "text": parse_inline(inner)
+                    })],
+                });
+                i += 1;
+                continue;
+            }
+            if !first_line.trim().is_empty() {
+                quote_lines.push(first_line.trim().to_string());
+            }
+            i += 1;
+            while i < n {
+                let curr = lines[i].trim();
+                if let Some(end) = curr.find("</blockquote>") {
+                    let before = curr[..end].trim();
+                    if !before.is_empty() {
+                        quote_lines.push(before.to_string());
+                    }
+                    i += 1;
+                    break;
+                }
+                quote_lines.push(curr.to_string());
+                i += 1;
+            }
+            blocks.push(RichBlock::BlockQuotation {
+                blocks: vec![json!({
+                    "type": "paragraph",
+                    "text": parse_inline(&quote_lines.join("\n"))
+                })],
             });
             continue;
         }
@@ -1013,7 +1279,7 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
         // 6. Blockquote (> quote)
         if stripped.starts_with('>') {
             let mut quote_lines = Vec::new();
-            while i < n && lines[i].trim().starts_with('>') {
+            while i < n && lines[i].trim().starts_with('>') && !lines[i].trim().starts_with(">>>") {
                 let q = lines[i].trim();
                 let stripped_q = q.strip_prefix('>').unwrap_or(q).trim_start();
                 quote_lines.push(stripped_q.to_string());
@@ -1029,17 +1295,56 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
         }
 
         // 7. Table (Markdown, Unicode, ASCII, Underline)
+        if let Some(inner) = stripped
+            .strip_prefix("[table:")
+            .or_else(|| stripped.strip_prefix("[caption:"))
+            .and_then(|r| r.strip_suffix(']'))
+        {
+            let cap = inner.trim();
+            if !cap.is_empty() && i + 1 < n {
+                let (t_cells, has_hdr, next_i) = try_parse_table(&lines, i + 1);
+                if let Some(cells) = t_cells {
+                    blocks.push(RichBlock::Table {
+                        cells,
+                        has_header: has_hdr,
+                        is_bordered: true,
+                        is_striped: true,
+                        is_compact: true,
+                        caption: Some(cap.to_string()),
+                    });
+                    i = next_i;
+                    continue;
+                }
+            }
+        }
+
         let (t_cells, has_hdr, next_i) = try_parse_table(&lines, i);
         if let Some(cells) = t_cells {
+            let mut caption: Option<String> = None;
+            let mut final_next_i = next_i;
+            if final_next_i < n {
+                let next_line = lines[final_next_i].trim();
+                if let Some(inner) = next_line
+                    .strip_prefix("[table:")
+                    .or_else(|| next_line.strip_prefix("[caption:"))
+                    .and_then(|r| r.strip_suffix(']'))
+                {
+                    let cap = inner.trim();
+                    if !cap.is_empty() {
+                        caption = Some(cap.to_string());
+                        final_next_i += 1;
+                    }
+                }
+            }
             blocks.push(RichBlock::Table {
                 cells,
                 has_header: has_hdr,
                 is_bordered: true,
                 is_striped: true,
                 is_compact: true,
-                caption: None,
+                caption,
             });
-            i = next_i;
+            i = final_next_i;
             continue;
         }
 
@@ -1115,8 +1420,12 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
                 || heading_re
                     .as_ref()
                     .is_some_and(|regex| regex.is_match(s_curr))
+                || s_curr.starts_with("**>")
+                || s_curr.starts_with("<blockquote")
                 || s_curr.starts_with('>')
                 || s_curr.starts_with(">>>")
+                || s_curr.starts_with("[table:")
+                || s_curr.starts_with("[caption:")
                 || s_curr.starts_with("[map:")
                 || s_curr.starts_with("![map]")
                 || s_curr.starts_with("<tg-map")
@@ -1345,5 +1654,92 @@ Paragraf normal";
             serde_json::to_value(streaming).unwrap(),
             serde_json::to_value(canonical).unwrap()
         );
+    }
+
+    #[test]
+    fn spoiler_and_strikethrough_parse_correctly() {
+        let markdown = "Info: ||rahasia besar|| dan ~~harga lama~~";
+        let parsed = parse_inline(markdown);
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(serialized.contains(r#""type":"spoiler""#));
+        assert!(serialized.contains("rahasia besar"));
+        assert!(serialized.contains(r#""type":"strikethrough""#));
+        assert!(serialized.contains("harga lama"));
+
+        let html = "Tag: <tg-spoiler>kunci rahasia</tg-spoiler> dan <s>coret html</s>";
+        let parsed_html = parse_inline(html);
+        let serialized_html = serde_json::to_string(&parsed_html).unwrap();
+        assert!(serialized_html.contains(r#""type":"spoiler""#));
+        assert!(serialized_html.contains("kunci rahasia"));
+        assert!(serialized_html.contains(r#""type":"strikethrough""#));
+        assert!(serialized_html.contains("coret html"));
+    }
+
+    #[test]
+    fn expandable_blockquote_parses_correctly() {
+        let markdown = "**> Baris penalaran pertama\n**> Baris penalaran kedua\n**> — As-tsaqib";
+        let blocks = parse_markdown_to_rich_blocks(markdown);
+        assert_eq!(blocks.len(), 1);
+        let Some(RichBlock::ExpandableBlockQuotation { text, credit }) = blocks.first() else {
+            panic!("expected expandable blockquote");
+        };
+        let text_str = serde_json::to_string(text).unwrap();
+        assert!(text_str.contains("Baris penalaran pertama"));
+        assert!(text_str.contains("Baris penalaran kedua"));
+        assert!(credit.is_some());
+        let credit_str = serde_json::to_string(&credit).unwrap();
+        assert!(credit_str.contains("As-tsaqib"));
+
+        let html =
+            "<blockquote expandable>Catatan terlipat penting<cite>Dokumentasi</cite></blockquote>";
+        let blocks_html = parse_markdown_to_rich_blocks(html);
+        assert_eq!(blocks_html.len(), 1);
+        let Some(RichBlock::ExpandableBlockQuotation {
+            text: h_text,
+            credit: h_credit,
+        }) = blocks_html.first()
+        else {
+            panic!("expected HTML expandable blockquote");
+        };
+        assert!(serde_json::to_string(h_text)
+            .unwrap()
+            .contains("Catatan terlipat penting"));
+        assert!(serde_json::to_string(h_credit)
+            .unwrap()
+            .contains("Dokumentasi"));
+    }
+
+    #[test]
+    fn table_compact_and_caption_parse_correctly() {
+        let text = "[table: Perbandingan Spesifikasi]\n| Model | Konteks |\n| :--- | :---: |\n| GPT-4o | 128k |\n| Claude | 200k |";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        let Some(RichBlock::Table {
+            cells,
+            is_compact,
+            caption,
+            has_header,
+            ..
+        }) = blocks.first()
+        else {
+            panic!("expected rich table block");
+        };
+        assert!(*is_compact);
+        assert!(*has_header);
+        assert_eq!(caption.as_deref(), Some("Perbandingan Spesifikasi"));
+        assert_eq!(cells.len(), 3);
+    }
+
+    #[test]
+    fn tg_document_links_and_underline_parse_correctly() {
+        let text = "Tautan: [Buka File](tg://document?id=doc_abc123) dan <u>garis bawah</u> serta ++format ins++";
+        let parsed = parse_inline(text);
+        let serialized = serde_json::to_string(&parsed).unwrap();
+        assert!(serialized.contains(r#""type":"url""#));
+        assert!(serialized.contains("tg://document?id=doc_abc123"));
+        assert!(serialized.contains("Buka File"));
+        assert!(serialized.contains(r#""type":"underline""#));
+        assert!(serialized.contains("garis bawah"));
+        assert!(serialized.contains("format ins"));
     }
 }
