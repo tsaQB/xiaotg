@@ -2389,6 +2389,9 @@ pub(crate) async fn run_cli_ai_hub(
         Some("rm") | Some("remove") => {
             run_cli_provider_remove(ai_service).await;
         }
+        Some("provider") | Some("providers") => {
+            run_cli_provider_menu(ai_service, target).await;
+        }
         Some("addon") | Some("addons") => {
             run_cli_addon_menu(ai_service).await;
         }
@@ -2424,11 +2427,10 @@ pub(crate) async fn run_cli_ai_hub(
             println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
             println!("     \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
             println!("     \x1b[36mxiao ai use <model>\x1b[0m Switch Main Model directly");
-            println!("     \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models");
             println!(
-                "     \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider"
+                "     \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models"
             );
-            println!("     \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
+            println!("     \x1b[36mxiao ai [add|rm]\x1b[0m    Add or remove an OpenAI-compatible AI provider");
             println!("     \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
             println!("     \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
         }
@@ -2462,8 +2464,9 @@ pub(crate) fn print_cli_help() {
     println!(
         "     \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models"
     );
-    println!("     \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider");
-    println!("     \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
+    println!(
+        "     \x1b[36mxiao ai [add|rm]\x1b[0m    Add or remove an OpenAI-compatible AI provider"
+    );
     println!("     \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
     println!("     \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
     println!("\x1b[1;37mSubcommands for 'gateway':\x1b[0m");

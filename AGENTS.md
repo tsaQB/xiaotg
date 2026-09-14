@@ -70,8 +70,7 @@ cargo run -- status              # Display system, database, and provider status
 cargo run -- ai                  # Open interactive unified AI management hub
 cargo run -- ai use <model>      # Switch Main Model directly (or provider/model)
 cargo run -- ai list             # Print table of registered providers and models
-cargo run -- ai add              # Add a new OpenAI-compatible AI provider
-cargo run -- ai rm               # Remove an existing provider
+cargo run -- ai [add|rm]         # Add or remove an OpenAI-compatible AI provider
 cargo run -- ai addon            # Configure multimodal specialist routes (Vision, Video, STT, Image)
 cargo run -- ai test             # Open live diagnostic probe center (or test: vision, stt, video, image, all)
 cargo run -- gateway             # Manage Telegram Bot Token and OWNER_USER_ID (check, token, owner)
