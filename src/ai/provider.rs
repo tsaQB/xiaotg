@@ -587,10 +587,6 @@ impl AIChatService {
         self.provider_store.read().await.providers.clone()
     }
 
-    pub async fn telegram_model_whitelist(&self) -> Vec<String> {
-        self.provider_store.read().await.telegram_models.clone()
-    }
-
     pub async fn get_active_provider(&self, _user_id: i64) -> Option<ProviderConfig> {
         let store = self.provider_store.read().await;
         store
@@ -607,9 +603,7 @@ impl AIChatService {
 
     pub async fn set_model_route(&self, role: ModelRole, route: ModelRoute) -> Result<(), String> {
         if role == ModelRole::Main {
-            return Err(
-                "Main Model is changed through `xiao model` or Telegram /model".to_string(),
-            );
+            return Err("Main Model is changed through `xiao model`".to_string());
         }
         if let ModelRoute::Specific { provider_id, model } = &route {
             let store = self.provider_store.read().await;
@@ -711,39 +705,6 @@ impl AIChatService {
     pub async fn resolve_model_route(&self, role: ModelRole) -> Result<ResolvedModelRoute, String> {
         let snapshot = self.generation_model_snapshot().await;
         Self::resolve_model_route_from_snapshot(&snapshot, role)
-    }
-
-    pub async fn update_provider_models(
-        &self,
-        _user_id: i64,
-        provider_id: &str,
-        models: Vec<String>,
-    ) -> bool {
-        let candidate = {
-            let store = self.provider_store.read().await;
-            let mut candidate = store.clone();
-            let Some(provider) = candidate
-                .providers
-                .iter_mut()
-                .find(|provider| provider.id == provider_id)
-            else {
-                return false;
-            };
-            provider.models = models;
-            if !provider
-                .models
-                .iter()
-                .any(|model| model == &provider.active_model)
-            {
-                provider.active_model = provider.models.first().cloned().unwrap_or_default();
-            }
-            candidate
-        };
-        if !persist_provider_state(candidate.clone()).await {
-            return false;
-        }
-        *self.provider_store.write().await = candidate;
-        true
     }
 
     #[allow(dead_code)]
@@ -2064,7 +2025,6 @@ mod tests {
         let mut store = ProviderStore {
             active_id: Some("main-a".to_string()),
             providers: vec![provider("main-a", "model-a"), provider("main-b", "model-b")],
-            telegram_models: Vec::new(),
         };
         let routing = ModelRoutingConfig::default();
         let (_, model, origin) = select_model_route(&store, &routing, ModelRole::Vision).unwrap();
@@ -2085,7 +2045,6 @@ mod tests {
                 provider("main", "main-model"),
                 provider("vision", "vision-v1"),
             ],
-            telegram_models: Vec::new(),
         };
         let mut routing = ModelRoutingConfig::default();
         routing
@@ -2191,7 +2150,6 @@ mod tests {
                         provider_store: ProviderStore {
                             active_id: Some(provider.id.clone()),
                             providers: vec![provider.clone()],
-                            telegram_models: vec![],
                         },
                         routing: ModelRoutingConfig::default(),
                         capabilities: CapabilityRegistry { models: records },
@@ -2729,7 +2687,6 @@ mod tests {
         let mut live_store = ProviderStore {
             active_id: Some("main-a".to_string()),
             providers: vec![provider("main-a", "model-a"), provider("main-b", "model-b")],
-            telegram_models: Vec::new(),
         };
         let routing = ModelRoutingConfig::default();
         let a = live_store.providers[0].clone();
@@ -2767,7 +2724,6 @@ mod tests {
         let mut live_store = ProviderStore {
             active_id: Some("main-a".to_string()),
             providers: vec![provider("main-a", "model-a"), provider("main-b", "model-b")],
-            telegram_models: Vec::new(),
         };
         let a = live_store.providers[0].clone();
         let b = live_store.providers[1].clone();
@@ -2813,7 +2769,6 @@ mod tests {
                 provider("vision-b", "vision-b"),
                 provider("main-c", "model-c"),
             ],
-            telegram_models: Vec::new(),
         };
         let mut routing = ModelRoutingConfig::default();
         routing

@@ -1,3 +1,4 @@
+use futures_util::StreamExt;
 use regex::Regex;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, REFERER, USER_AGENT};
 use serde_json::{json, Value};
@@ -566,19 +567,26 @@ async fn search_wikipedia(client: &reqwest::Client, query: &str) -> Result<Strin
     }
 }
 
+const MAX_FETCH_HTML_BYTES: usize = 2 * 1024 * 1024;
+
 pub async fn fetch_web_content(url: &str) -> Result<String, String> {
     let u = url.trim();
     if !u.starts_with("http://") && !u.starts_with("https://") {
         return Err("URL harus diawali dengan http:// atau https://".to_string());
     }
 
+    let resolved = crate::bot::url_policy::resolve_download_url(u).await?;
+
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve(&resolved.host, resolved.address)
         .build()
-        .unwrap_or_default();
+        .map_err(|e| format!("Gagal menginisialisasi client HTTP: {e}"))?;
 
     let resp = client
-        .get(u)
+        .get(resolved.url)
         .header(USER_AGENT, "xiao/0.3.0 (Telegram Bot Assistant)")
         .header(
             ACCEPT,
@@ -594,10 +602,24 @@ pub async fn fetch_web_content(url: &str) -> Result<String, String> {
         return Err(format!("Halaman web mengembalikan status HTTP {status}"));
     }
 
-    let html = resp
-        .text()
-        .await
-        .map_err(|e| format!("Gagal membaca konten web: {e}"))?;
+    if resp
+        .content_length()
+        .is_some_and(|length| length > MAX_FETCH_HTML_BYTES as u64)
+    {
+        return Err("Ukuran konten web melebihi batas aman 2 MiB.".to_string());
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| format!("Gagal membaca stream web: {e}"))?;
+        if bytes.len().saturating_add(chunk.len()) > MAX_FETCH_HTML_BYTES {
+            return Err("Ukuran konten web melebihi batas aman 2 MiB.".to_string());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    let html = String::from_utf8_lossy(&bytes);
 
     // Clean scripts, styles, and html tags
     let no_script = Regex::new(r"(?is)<script.*?</script>")

@@ -56,6 +56,7 @@
 
 ### Rendering & Telegram
 - Streamline Telegram to an ultra-clean chat surface by removing /model, /context, /menu, ReplyKeyboards, and complex pagination/rename inline widgets; all model, specialist, and system controls are managed via CLI while keeping Telegram dedicated to direct chat, /clear, /new, and /image.
+- Cleanly remove Telegram /model command handling, picker callbacks, and CLI `xiao pick` subcommand in favor of centralized CLI management.
 - Split streaming Markdown into stable native-Rich content plus a sanitized provisional tail so incomplete delimiters do not flash raw syntax.
 - Enforce local Rich Message structural budgets and degrade deterministically when a payload exceeds them.
 - Make permanent fallback canonical: Rich AST → safe HTML → AST-derived semantic plain text; never raw model Markdown.

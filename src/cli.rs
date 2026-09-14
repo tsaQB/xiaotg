@@ -1434,86 +1434,6 @@ pub(crate) async fn run_cli_model_picker(ai_service: &AIChatService, initial_fil
     }
 }
 
-pub(crate) async fn run_cli_telegram_pick(ai_service: &AIChatService) {
-    let mut store = load_provider_store();
-    store.telegram_models.truncate(10);
-    if store.providers.is_empty() {
-        println!("\x1b[33mBelum ada AI Provider yang terdaftar.\x1b[0m\n");
-        return;
-    }
-    for provider in &mut store.providers {
-        if provider.models.len() <= 1 && !provider.endpoint.is_empty() {
-            if let (true, Ok(models)) = ai_service
-                .fetch_models_from_endpoint(&provider.endpoint, &provider.api_key)
-                .await
-            {
-                if !models.is_empty() {
-                    provider.models = models;
-                }
-            }
-        }
-    }
-    let mut catalog: Vec<(String, String, String)> = Vec::new();
-    for provider in &store.providers {
-        for model in &provider.models {
-            catalog.push((
-                provider.id.clone(),
-                model.clone(),
-                format!("{} ({})", model, provider.name),
-            ));
-        }
-    }
-    if catalog.is_empty() {
-        println!("\x1b[33mTidak ada model yang ditemukan.\x1b[0m\n");
-        return;
-    }
-    let items: Vec<String> = catalog
-        .iter()
-        .map(|(_, _, display)| display.clone())
-        .collect();
-    let selected_flags: Vec<bool> = catalog
-        .iter()
-        .map(|(provider_id, model, _)| {
-            let key = format!("{}::{}", provider_id, model);
-            store
-                .telegram_models
-                .iter()
-                .any(|selected| selected == &key || selected == model)
-        })
-        .collect();
-
-    let selected = terminal_interactive_multi_select(
-        "Pilih Model Menu Telegram (Maksimal 10):",
-        &items,
-        &selected_flags,
-        10,
-    );
-    let Some(indices) = selected else {
-        return;
-    };
-    store.telegram_models = indices
-        .into_iter()
-        .filter_map(|idx| {
-            let (provider_id, model, _) = catalog.get(idx)?;
-            Some(format!("{}::{}", provider_id, model))
-        })
-        .collect();
-    if let Err(e) = save_provider_store(&store) {
-        println!("\n\x1b[31m✖ Error: Gagal menyimpan whitelist model Telegram: {e}\x1b[0m\n");
-        return;
-    }
-    if store.telegram_models.is_empty() {
-        println!(
-            "\n\x1b[1;32m✔ Whitelist dibersihkan; seluruh model tampil di menu Telegram.\x1b[0m\n"
-        );
-    } else {
-        println!(
-            "\n\x1b[1;32m✔ Disimpan: {} model aktif untuk menu Telegram.\x1b[0m\n",
-            store.telegram_models.len()
-        );
-    }
-}
-
 fn addon_role_short_label(role: ModelRole) -> &'static str {
     match role {
         ModelRole::Vision => "Vision",
@@ -2131,7 +2051,6 @@ pub(crate) fn print_cli_help() {
     println!("  \x1b[36mgateway\x1b[0m             Kelola gateway chat (Telegram token & owner) [Interaktif]");
     println!("  \x1b[36mprovider [add|rm]\x1b[0m   Kelola provider AI (list, tambah, hapus)     [Interaktif]\n");
     println!("  \x1b[36mmodel [query|addon]\x1b[0m Pilih Main Model atau kelola Addon Multimodal [Interaktif]");
-    println!("  \x1b[36mpick\x1b[0m                Pilih daftar model untuk menu Telegram      [Interaktif]");
     println!("  \x1b[36mprobe\x1b[0m               Pusat diagnostik kapabilitas & live test    [Interaktif]");
     println!("  \x1b[36mhelp\x1b[0m                Tampilkan panduan perintah ini\n");
 }

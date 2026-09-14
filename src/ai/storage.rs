@@ -51,8 +51,6 @@ impl fmt::Debug for ProviderConfig {
 pub struct ProviderStore {
     pub active_id: Option<String>,
     pub providers: Vec<ProviderConfig>,
-    #[serde(default)]
-    pub telegram_models: Vec<String>,
 }
 
 const SECRET_SCHEME_PREFIX: &str = "secret://";
@@ -524,7 +522,9 @@ fn open_session_db() -> rusqlite::Result<Connection> {
             attempts INTEGER NOT NULL DEFAULT 0,
             received_at TEXT NOT NULL,
             last_error TEXT
-        );",
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_user_session ON messages(user_id, session_id);
+        CREATE INDEX IF NOT EXISTS idx_telegram_inbox_status_update_id ON telegram_inbox(status, update_id);",
     )?;
     ensure_column(
         &conn,
@@ -2107,7 +2107,6 @@ mod tests {
         let json = serde_json::to_string(&ProviderStore {
             active_id: Some("p1".to_string()),
             providers: vec![provider.clone()],
-            telegram_models: Vec::new(),
         })
         .unwrap();
         assert!(!json.contains(secret));

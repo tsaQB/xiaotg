@@ -122,7 +122,6 @@ xiao status         # Dashboard status sistem lengkap & ringkas
 xiao gateway        # Kelola gateway Telegram (Token & Owner ID)
 xiao provider       # Kelola daftar provider AI (List, Tambah, Hapus, Switch)
 xiao model [query]  # Pilih atau cari Main Model via pencarian langsung
-xiao pick           # Pilih daftar whitelist model untuk menu /model Telegram (maks 10)
 xiao addon          # Atur delegasi spesialis multimodal (Vision/Audio/Video/Gen)
 xiao probe          # Pusat diagnostik kapabilitas, audit cache & live testing
 

@@ -32,6 +32,34 @@ fn is_unsafe_ipv6(ip: Ipv6Addr) -> bool {
         return is_unsafe_ipv4(ipv4);
     }
     let segments = ip.segments();
+    // Well-Known Prefix NAT64 RFC 6052 64:ff9b::/96
+    if segments[0] == 0x64
+        && segments[1] == 0xff9b
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0
+    {
+        let octets = ip.octets();
+        let ipv4 = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
+        if is_unsafe_ipv4(ipv4) {
+            return true;
+        }
+    }
+    // Stateless IP/ICMP Translation (SIIT) RFC 7915 / RFC 2765 ::ffff:0:a.b.c.d/96
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0xffff
+        && segments[5] == 0
+    {
+        let octets = ip.octets();
+        let ipv4 = Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
+        if is_unsafe_ipv4(ipv4) {
+            return true;
+        }
+    }
     ip.is_unspecified()
         || ip.is_loopback()
         || ip.is_multicast()
@@ -129,5 +157,14 @@ mod tests {
         assert!(!is_unsafe_remote_ip(
             "2606:4700:4700::1111".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn blocks_nat64_and_siit_translated_private_ips() {
+        assert!(is_unsafe_remote_ip("64:ff9b::127.0.0.1".parse().unwrap()));
+        assert!(is_unsafe_remote_ip("64:ff9b::192.168.1.1".parse().unwrap()));
+        assert!(is_unsafe_remote_ip("::ffff:0:10.0.0.1".parse().unwrap()));
+        assert!(!is_unsafe_remote_ip("64:ff9b::1.1.1.1".parse().unwrap()));
+        assert!(!is_unsafe_remote_ip("::ffff:0:1.1.1.1".parse().unwrap()));
     }
 }

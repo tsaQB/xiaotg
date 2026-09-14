@@ -847,7 +847,6 @@ pub struct AIChatService {
     pub(super) model_routing: Arc<RwLock<ModelRoutingConfig>>,
     pub user_wizard_state: Arc<RwLock<HashMap<i64, HashMap<String, String>>>>,
     pub model_metadata: Arc<RwLock<HashMap<String, ModelMetadata>>>,
-    pub model_picker_query: Arc<RwLock<HashMap<i64, String>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -905,7 +904,6 @@ impl AIChatService {
             model_routing: Arc::new(RwLock::new(model_routing)),
             user_wizard_state: Arc::new(RwLock::new(HashMap::new())),
             model_metadata: Arc::new(RwLock::new(HashMap::new())),
-            model_picker_query: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -3469,7 +3467,6 @@ mod tests {
             provider_store: ProviderStore {
                 active_id: Some(provider.id.clone()),
                 providers: vec![provider.clone()],
-                telegram_models: vec![],
             },
             routing: super::super::routing::ModelRoutingConfig::default(),
             capabilities: super::super::storage::CapabilityRegistry { models: vec![] },
@@ -4096,13 +4093,11 @@ mod tests {
             provider_store: Arc::new(RwLock::new(ProviderStore {
                 active_id: Some(provider.id.clone()),
                 providers: vec![provider],
-                telegram_models: vec![],
             })),
             capability_registry: Default::default(),
             model_routing: Default::default(),
             user_wizard_state: Default::default(),
             model_metadata: Default::default(),
-            model_picker_query: Default::default(),
         }
     }
 

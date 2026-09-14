@@ -28,7 +28,7 @@ use bot::models::{
 };
 use parser::build_full_rich_message;
 use timeline::{ExecutionTimeline, ProgressActivity};
-use util::{escape_html, truncate_chars, truncate_chars_with_ellipsis};
+use util::{escape_html, truncate_chars};
 
 type UserLastImagePrompt = Arc<RwLock<HashMap<i64, String>>>;
 
@@ -186,233 +186,6 @@ fn get_collapsed_menu_keyboard() -> Value {
 // ==========================================
 // UI Builders
 // ==========================================
-
-async fn build_provider_model_picker(
-    ai_service: &AIChatService,
-    user_id: i64,
-    provider_id: &str,
-    page: usize,
-    page_size: usize,
-    is_setup: bool,
-    search_query: Option<&str>,
-) -> (String, InlineKeyboardMarkup) {
-    let mut providers = ai_service.get_user_providers(user_id).await;
-
-    if providers.is_empty() {
-        return (
-            "<b>Belum ada AI Provider yang dikonfigurasi.</b>\n\nSilakan jalankan <code>xiao provider</code> di terminal.".to_string(),
-            InlineKeyboardMarkup::new(vec![vec![InlineKeyboardButton::callback("Close", "provider_close")]]),
-        );
-    }
-
-    // Auto fetch if needed
-    for prov in providers.iter_mut() {
-        if prov.models.len() <= 1 && !prov.endpoint.is_empty() {
-            if let (true, Ok(fetched)) = ai_service
-                .fetch_models_from_endpoint(&prov.endpoint, &prov.api_key)
-                .await
-            {
-                if !fetched.is_empty() {
-                    if ai_service
-                        .update_provider_models(user_id, &prov.id, fetched.clone())
-                        .await
-                    {
-                        prov.models = fetched;
-                    } else {
-                        eprintln!("[WARN] Provider model refresh was not persisted; keeping durable catalog");
-                    }
-                }
-            }
-        }
-    }
-
-    let active_prov = ai_service.get_active_provider(user_id).await;
-    let active_prov_id = active_prov.as_ref().map(|p| p.id.as_str()).unwrap_or("");
-    let current_active_model = ai_service.get_user_model(user_id).await;
-
-    let is_search = search_query.map(|s| !s.trim().is_empty()).unwrap_or(false);
-    let clean_query = search_query.unwrap_or("").trim();
-    let q_low = clean_query.to_lowercase();
-    let safe_query = escape_html(clean_query);
-    let safe_active_model = escape_html(&current_active_model);
-
-    // If setup mode and a specific provider is specified, only show that provider's models
-    let target_providers: Vec<&ProviderConfig> =
-        if is_setup && provider_id != "all" && !provider_id.is_empty() {
-            providers.iter().filter(|p| p.id == provider_id).collect()
-        } else {
-            providers.iter().collect()
-        };
-
-    // Aggregate catalog across all target providers: (prov_id, prov_name, orig_model_idx, model_name, is_active)
-    let mut display_models: Vec<(String, String, usize, String, bool)> = Vec::new();
-    let telegram_whitelist = ai_service.telegram_model_whitelist().await;
-    for prov in target_providers {
-        let is_this_prov_active = prov.id == active_prov_id;
-        for (orig_idx, m) in prov.models.iter().enumerate() {
-            let whitelist_key = format!("{}::{}", prov.id, m);
-            if !is_setup
-                && !telegram_whitelist.is_empty()
-                && !telegram_whitelist
-                    .iter()
-                    .any(|selected| selected == &whitelist_key || selected == m)
-            {
-                continue;
-            }
-            if is_search
-                && !m.to_lowercase().contains(&q_low)
-                && !prov.name.to_lowercase().contains(&q_low)
-            {
-                continue;
-            }
-            let is_model_active =
-                is_this_prov_active && (m == &prov.active_model || m == &current_active_model);
-            display_models.push((
-                prov.id.clone(),
-                prov.name.clone(),
-                orig_idx,
-                m.clone(),
-                is_model_active,
-            ));
-        }
-    }
-
-    let total_models = display_models.len();
-    let total_pages = 1.max(total_models.div_ceil(page_size));
-    let curr_page = 1.max(page.min(total_pages));
-
-    let start_idx = (curr_page - 1) * page_size;
-    let end_idx = (start_idx + page_size).min(total_models);
-    let page_models = if total_models > 0 {
-        &display_models[start_idx..end_idx]
-    } else {
-        &[]
-    };
-
-    let is_multi_provider = providers.len() > 1;
-
-    let text = if is_setup {
-        let prov_name = providers
-            .iter()
-            .find(|p| p.id == provider_id)
-            .map(|p| p.name.as_str())
-            .unwrap_or("Provider");
-        let safe_prov_name = escape_html(prov_name);
-        format!(
-            "✨ <b>Endpoint Terhubung! ({})</b>\n\n\
-             📋 Ditemukan <b>{} model AI</b> pada endpoint ini.\n\
-             Silakan <b>klik 1x pada model pilihan Anda</b> di bawah untuk langsung mengaktifkannya dan menyelesaikan setup:",
-            safe_prov_name, total_models
-        )
-    } else if is_search {
-        if total_models == 0 {
-            format!(
-                "🔍 <b>Pencarian Model AI:</b> \"<code>{safe_query}</code>\"\n\n\
-                 ⚠️ <i>Tidak ada model yang cocok dengan kata kunci tersebut di semua provider.</i>\n\
-                 Silakan cari kata kunci lain atau sentuh tombol di bawah:"
-            )
-        } else {
-            format!(
-                "🔍 <b>Hasil Pencarian Model untuk:</b> \"<code>{safe_query}</code>\"\n\
-                 Model aktif saat ini: <code>{}</code>\n\
-                 Ditemukan: <b>{} model</b> (Halaman {}/{})\n\n\
-                 Sentuh salah satu model di bawah untuk mengaktifkannya:",
-                safe_active_model, total_models, curr_page, total_pages
-            )
-        }
-    } else {
-        if is_multi_provider {
-            format!(
-                "<b>Model</b> (Total <b>{} model</b> dari <b>{} provider</b>)\n\
-                 Model aktif saat ini: <code>{}</code> (Halaman {}/{})\n\n\
-                 Sentuh salah satu model di bawah untuk langsung mengaktifkannya dalam 1x klik:",
-                total_models,
-                providers.len(),
-                safe_active_model,
-                curr_page,
-                total_pages
-            )
-        } else {
-            let prov_name = providers
-                .first()
-                .map(|p| p.name.as_str())
-                .unwrap_or("Provider");
-            let safe_prov_name = escape_html(prov_name);
-            format!(
-                "<b>Model untuk '{}'</b>\n\
-                 Model aktif saat ini: <code>{}</code>\n\
-                 Total Model Tersedia: <b>{}</b> (Halaman {}/{})\n\n\
-                 Sentuh salah satu model di bawah untuk langsung mengaktifkannya dalam 1x klik:",
-                safe_prov_name, safe_active_model, total_models, curr_page, total_pages
-            )
-        }
-    };
-
-    let mut rows = Vec::new();
-    let mut current_row = Vec::new();
-
-    for (p_id, p_name, orig_global_idx, m, is_sel) in page_models {
-        let mut btn_txt = if is_setup || !is_sel {
-            if is_multi_provider && !is_setup {
-                format!("{m} ({p_name})")
-            } else {
-                m.to_string()
-            }
-        } else {
-            if is_multi_provider && !is_setup {
-                format!("[active] {m} ({p_name})")
-            } else {
-                format!("[active] {m}")
-            }
-        };
-
-        if btn_txt.len() > 30 {
-            btn_txt = truncate_chars_with_ellipsis(&btn_txt, 27);
-        }
-        current_row.push(InlineKeyboardButton::callback(
-            btn_txt,
-            format!("set_m:{p_id}:{orig_global_idx}"),
-        ));
-        if current_row.len() == 2 {
-            rows.push(current_row);
-            current_row = Vec::new();
-        }
-    }
-    if !current_row.is_empty() {
-        rows.push(current_row);
-    }
-
-    let target_nav_id = if is_setup { provider_id } else { "all" };
-
-    if total_pages > 1 {
-        let mut nav_row = Vec::new();
-        if curr_page > 1 {
-            nav_row.push(InlineKeyboardButton::callback(
-                "Prev",
-                format!("provider_models:{target_nav_id}:{}", curr_page - 1),
-            ));
-        }
-        nav_row.push(InlineKeyboardButton::disabled(format!(
-            "Hal {curr_page}/{total_pages}"
-        )));
-        if curr_page < total_pages {
-            nav_row.push(InlineKeyboardButton::callback(
-                "Next",
-                format!("provider_models:{target_nav_id}:{}", curr_page + 1),
-            ));
-        }
-        rows.push(nav_row);
-    }
-
-    if !is_setup {
-        rows.push(vec![InlineKeyboardButton::callback(
-            "Close",
-            "provider_close",
-        )]);
-    }
-
-    (text, InlineKeyboardMarkup::new(rows))
-}
 
 fn truncate_session_name(name: &str, max_chars: usize) -> String {
     if name.chars().count() <= max_chars {
@@ -826,10 +599,6 @@ fn build_help_ui() -> InputRichMessage {
     ])
 }
 
-fn telegram_can_edit_model_role(role: ai::service::ModelRole) -> bool {
-    role == ai::service::ModelRole::Main
-}
-
 fn specialist_context_policy(
     role: ai::service::ModelRole,
     origin: ai::service::RouteOrigin,
@@ -1014,303 +783,6 @@ async fn run_observable_main_capability_probe(
         },
     ]);
     let _ = bot.send_rich_message(chat_id, &completed, None, None).await;
-}
-
-#[allow(dead_code)]
-async fn build_model_dashboard_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMessage {
-    let providers = ai_service.get_user_providers(user_id).await;
-    let routing = ai_service.model_routing_config().await;
-    let stats = ai_service.get_context_stats(user_id).await;
-    let main = ai_service
-        .resolve_model_route_unchecked(ai::service::ModelRole::Main)
-        .await
-        .ok();
-
-    let (provider_name, model_name, health, capability_detail) = if let Some(route) = &main {
-        let health = if ai_service
-            .resolve_model_route(ai::service::ModelRole::Main)
-            .await
-            .is_ok()
-        {
-            "Configured"
-        } else {
-            "Unavailable"
-        };
-        let cap = &route.capability;
-        let effective =
-            |kind| format!("{:?}", AIChatService::effective_capability_state(cap, kind));
-        (
-            route.provider.name.clone(),
-            route.model.clone(),
-            health.to_string(),
-            format!(
-                "Text Chat: {}\nImage Input: {}\nImage Generation: {}\nImage Editing: {}\nAudio Input: {}\nAudio Transcription: {}\nVideo Input: {}\nNative File: {}\nTools: {}\nStructured Output: {}\nReasoning: {}",
-                effective(ai::service::CapabilityKind::TextChat),
-                effective(ai::service::CapabilityKind::ImageInput),
-                effective(ai::service::CapabilityKind::ImageGeneration),
-                effective(ai::service::CapabilityKind::ImageEditing),
-                effective(ai::service::CapabilityKind::AudioInput),
-                effective(ai::service::CapabilityKind::AudioTranscription),
-                effective(ai::service::CapabilityKind::VideoInput),
-                effective(ai::service::CapabilityKind::NativeFileInput),
-                effective(ai::service::CapabilityKind::Tools),
-                effective(ai::service::CapabilityKind::StructuredOutput),
-                effective(ai::service::CapabilityKind::Reasoning),
-            ),
-        )
-    } else {
-        (
-            "Not configured".to_string(),
-            "Not configured".to_string(),
-            "Unavailable".to_string(),
-            "Main Model is not configured.".to_string(),
-        )
-    };
-
-    let mut addon_rows = vec![vec![
-        RichBlockTableCell::text_only("Addon Role", true, Some("left")),
-        RichBlockTableCell::text_only("Route", true, Some("left")),
-    ]];
-    for role in ai::service::ModelRole::addon_roles() {
-        let route = routing
-            .route(role)
-            .cloned()
-            .unwrap_or(ai::service::ModelRoute::MainModel);
-        let route_text = match route {
-            ai::service::ModelRoute::MainModel => "Main Model".to_string(),
-            ai::service::ModelRoute::Disabled => "Disabled".to_string(),
-            ai::service::ModelRoute::Specific { provider_id, model } => {
-                let name = providers
-                    .iter()
-                    .find(|provider| provider.id == provider_id)
-                    .map(|provider| provider.name.as_str())
-                    .unwrap_or(provider_id.as_str());
-                format!("{name} / {model}")
-            }
-        };
-        let route_health = match ai_service.resolve_model_route(role).await {
-            Ok(_) => "Configured",
-            Err(error) if error.contains("Disabled") => "Disabled",
-            Err(_) => "Unavailable",
-        };
-        addon_rows.push(vec![
-            RichBlockTableCell::text_only(
-                role.display_name().trim_end_matches(" Model"),
-                false,
-                Some("left"),
-            ),
-            RichBlockTableCell::text_only(
-                &format!("{route_text} · {route_health}"),
-                false,
-                Some("left"),
-            ),
-        ]);
-    }
-
-    InputRichMessage::new(vec![
-        RichBlock::SectionHeading {
-            text: Value::String("MODEL".to_string()),
-            level: 1,
-        },
-        RichBlock::Table {
-            cells: vec![
-                vec![
-                    RichBlockTableCell::text_only("Main Model", true, Some("left")),
-                    RichBlockTableCell::text_only("Value", true, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Provider", false, Some("left")),
-                    RichBlockTableCell::text_only(&provider_name, false, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Model", false, Some("left")),
-                    RichBlockTableCell::text_only(&model_name, false, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Context", false, Some("left")),
-                    RichBlockTableCell::text_only(&stats.limit_str, false, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Status", false, Some("left")),
-                    RichBlockTableCell::text_only(&health, false, Some("left")),
-                ],
-            ],
-            has_header: true,
-            is_bordered: true,
-            is_striped: true,
-            is_compact: true,
-            caption: None,
-        },
-        RichBlock::Table {
-            cells: addon_rows,
-            has_header: true,
-            is_bordered: true,
-            is_striped: true,
-            is_compact: true,
-            caption: None,
-        },
-        RichBlock::Details {
-            summary: Value::String("Main Model Capabilities".to_string()),
-            blocks: vec![json!({"type":"paragraph","text": capability_detail})],
-            is_open: Some(false),
-        },
-        RichBlock::BlockQuotation {
-            blocks: vec![json!({
-                "type":"paragraph",
-                "text":"Addon routes are read-only in Telegram v0.3.0. Configure them with xiao addon; changing Main never overwrites Specific routes."
-            })],
-        },
-        RichBlock::Buttons {
-            buttons: {
-                let mut buttons = Vec::new();
-                if telegram_can_edit_model_role(ai::service::ModelRole::Main) {
-                    buttons.push(RichMessageButton::callback_styled(
-                        "Change Main",
-                        "model_change_main",
-                        "primary",
-                    ));
-                }
-                buttons.push(RichMessageButton::callback("Refresh", "model_dashboard"));
-                buttons
-            },
-            align: Some("center".to_string()),
-        },
-    ])
-}
-
-#[allow(dead_code)]
-async fn build_main_model_picker_rich(
-    ai_service: &AIChatService,
-    user_id: i64,
-    query: Option<&str>,
-    page: usize,
-) -> InputRichMessage {
-    let providers = ai_service.get_user_providers(user_id).await;
-    let q = query.unwrap_or("").trim().to_ascii_lowercase();
-    let mut matches = Vec::new();
-    for provider in &providers {
-        for (index, model) in provider.models.iter().enumerate() {
-            if q.is_empty()
-                || model.to_ascii_lowercase().contains(&q)
-                || provider.name.to_ascii_lowercase().contains(&q)
-            {
-                matches.push((
-                    provider.id.clone(),
-                    provider.name.clone(),
-                    index,
-                    model.clone(),
-                ));
-            }
-        }
-    }
-
-    let page_size = 8usize;
-    let total_pages = 1.max(matches.len().div_ceil(page_size));
-    let curr_page = page.clamp(1, total_pages);
-    let start = (curr_page - 1) * page_size;
-    let end = (start + page_size).min(matches.len());
-
-    let mut rows = vec![vec![
-        RichBlockTableCell::text_only("Model", true, Some("left")),
-        RichBlockTableCell::text_only("Provider", true, Some("left")),
-    ]];
-    let mut buttons = Vec::new();
-    for (provider_id, provider_name, model_index, model) in &matches[start..end] {
-        rows.push(vec![
-            RichBlockTableCell::text_only(
-                &truncate_chars_with_ellipsis(model, 28),
-                false,
-                Some("left"),
-            ),
-            RichBlockTableCell::text_only(
-                &truncate_chars_with_ellipsis(provider_name, 20),
-                false,
-                Some("left"),
-            ),
-        ]);
-        buttons.push(RichMessageButton::callback(
-            truncate_chars_with_ellipsis(model, 24),
-            format!("set_m:{provider_id}:{model_index}"),
-        ));
-    }
-    if matches.is_empty() {
-        rows.push(vec![
-            RichBlockTableCell::text_only("No matching model", false, Some("left")),
-            RichBlockTableCell::text_only("-", false, Some("left")),
-        ]);
-    }
-
-    let mut blocks = vec![
-        RichBlock::SectionHeading {
-            text: Value::String("CHANGE MAIN MODEL".to_string()),
-            level: 1,
-        },
-        RichBlock::Paragraph {
-            text: Value::String(if q.is_empty() {
-                format!("Available Main models · page {curr_page}/{total_pages}")
-            } else {
-                format!("Filter: {q} · page {curr_page}/{total_pages}")
-            }),
-        },
-        RichBlock::Table {
-            cells: rows,
-            has_header: true,
-            is_bordered: true,
-            is_striped: true,
-            is_compact: true,
-            caption: None,
-        },
-    ];
-    if !buttons.is_empty() {
-        blocks.push(RichBlock::Buttons {
-            buttons,
-            align: Some("center".to_string()),
-        });
-    }
-    if total_pages > 1 {
-        blocks.push(RichBlock::Buttons {
-            buttons: vec![
-                if curr_page > 1 {
-                    RichMessageButton::callback("‹", format!("model_main_page:{}", curr_page - 1))
-                } else {
-                    RichMessageButton::disabled("‹")
-                },
-                RichMessageButton::disabled(format!("{curr_page}/{total_pages}")),
-                if curr_page < total_pages {
-                    RichMessageButton::callback("›", format!("model_main_page:{}", curr_page + 1))
-                } else {
-                    RichMessageButton::disabled("›")
-                },
-            ],
-            align: Some("center".to_string()),
-        });
-    }
-    blocks.push(RichBlock::Buttons {
-        buttons: vec![RichMessageButton::callback("Back", "model_dashboard")],
-        align: Some("center".to_string()),
-    });
-    InputRichMessage::new(blocks)
-}
-
-#[allow(dead_code)]
-async fn send_model_dashboard(
-    bot: &TelegramBotClient,
-    ai_service: &AIChatService,
-    chat_id: i64,
-    user_id: i64,
-    message_id: Option<i64>,
-) {
-    let rich = build_model_dashboard_ui(ai_service, user_id).await;
-    if let Some(message_id) = message_id {
-        if bot
-            .edit_rich_message(chat_id, message_id, &rich, None)
-            .await
-            .is_ok()
-        {
-            return;
-        }
-    }
-    let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
 }
 
 fn build_clear_confirmation_ui() -> InputRichMessage {
@@ -2389,7 +1861,7 @@ fn is_control_message_text(text: &str) -> bool {
     }
 
     let commands = [
-        "/start", "/menu", "/new", "/session", "/context", "/model", "/clear", "/cancel", "/help",
+        "/start", "/menu", "/new", "/session", "/context", "/clear", "/cancel", "/help",
     ];
     if commands
         .iter()
@@ -2780,6 +2252,19 @@ async fn handle_update(
             }
         }
 
+        if has_photo && image_bytes.is_none() {
+            let _ = bot
+                .send_message(
+                    chat_id,
+                    "⚠️ <b>Gagal mengunduh gambar dari server Telegram.</b> Silakan coba kirim ulang.",
+                    Some("HTML"),
+                    Some(get_main_menu_keyboard()),
+                    None,
+                    None,
+                )
+                .await;
+            return;
+        }
         if has_audio && audio_bytes.is_none() {
             let _ = bot
                 .send_message(
@@ -3017,18 +2502,6 @@ async fn handle_update(
                 )
                 .await;
             return;
-        } else if has_photo && image_bytes.is_none() {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "⚠️ <b>Gagal mengunduh gambar dari server Telegram.</b> Silakan coba kirim ulang.",
-                    Some("HTML"),
-                    Some(get_main_menu_keyboard()),
-                    None,
-                    None,
-                )
-                .await;
-            return;
         }
 
         // Navigation Commands
@@ -3121,29 +2594,6 @@ async fn handle_update(
                 .send_message(
                     chat_id,
                     "ℹ️ <b>Status & Konteks Sistem</b> dikelola melalui backend terminal.\nJalankan <code>xiao status</code> di CLI untuk melihat statistik lengkap.",
-                    Some("HTML"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-        } else if command_matches(&text, "/model")
-            || [
-                "ᴍᴏᴅᴇʟ",
-                "⚙️ ᴍᴏᴅᴇʟ",
-                "⚙️ Model",
-                "Model",
-                "model",
-                "⚙️ Model AI",
-                "Pilih Model",
-            ]
-            .contains(&text.as_str())
-            || text.starts_with("⚡ ")
-        {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "ℹ️ <b>Pengaturan Model & Provider</b> dikelola melalui backend terminal.\nJalankan <code>xiao model</code> atau <code>xiao provider</code> di CLI.",
                     Some("HTML"),
                     None,
                     None,
@@ -3322,17 +2772,6 @@ async fn handle_update(
                     )
                     .await;
             }
-        } else if cq_data == "model_dashboard"
-            || cq_data == "model_change_main"
-            || cq_data.starts_with("model_main_page:")
-        {
-            let _ = bot
-                .answer_callback_query(
-                    &cq_id,
-                    Some("Pengaturan model dikelola melalui CLI (xiao model)."),
-                    false,
-                )
-                .await;
         } else if cq_data == "action_help" {
             let _ = bot.answer_callback_query(&cq_id, None, false).await;
             let rich = build_help_ui();
@@ -3353,48 +2792,6 @@ async fn handle_update(
             if let Some(mid) = msg_id {
                 let _ = bot.delete_message(chat_id, mid).await;
             }
-        } else if let Some(rest) = cq_data.strip_prefix("provider_models:") {
-            let parts: Vec<&str> = rest.split(':').collect();
-            let prov_id = parts[0];
-            let target_page: usize = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(1);
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            let (text_m, kb_m) = build_provider_model_picker(
-                ai_service,
-                user_id,
-                prov_id,
-                target_page,
-                8,
-                false,
-                None,
-            )
-            .await;
-            let kb_val = serde_json::to_value(kb_m).ok();
-
-            if let Some(mid) = msg_id {
-                if bot
-                    .edit_message_text(
-                        Some(chat_id),
-                        Some(mid),
-                        &text_m,
-                        Some("HTML"),
-                        kb_val.clone(),
-                    )
-                    .await
-                    .is_err()
-                {
-                    let _ = bot
-                        .send_message(chat_id, &text_m, Some("HTML"), kb_val, None, None)
-                        .await;
-                }
-            }
-        } else if cq_data.starts_with("set_m:") {
-            let _ = bot
-                .answer_callback_query(
-                    &cq_id,
-                    Some("Pengaturan model dikelola melalui CLI (xiao model)."),
-                    false,
-                )
-                .await;
         } else if cq_data == "provider_cancel" {
             ai_service.user_wizard_state.write().await.remove(&user_id);
             let _ = bot
@@ -3541,10 +2938,6 @@ async fn main() {
             }
             return;
         }
-        "pick" => {
-            run_cli_telegram_pick(&ai_service).await;
-            return;
-        }
         "addon" => {
             run_cli_addon_menu(&ai_service).await;
             return;
@@ -3619,7 +3012,6 @@ async fn main() {
         BotCommand::ephemeral("new", "Mulai chat baru & buka Session Manager"),
         BotCommand::ephemeral("session", "Kelola daftar session obrolan"),
         BotCommand::ephemeral("start", "Mulai bot & info provider"),
-        BotCommand::ephemeral("model", "Ganti model AI"),
         BotCommand::ephemeral("clear", "Reset riwayat percakapan chat"),
         BotCommand::ephemeral("cancel", "Batalkan aksi interaktif aktif"),
         BotCommand::ephemeral("help", "Daftar perintah dan panduan"),
@@ -3829,7 +3221,6 @@ mod update_lane_tests {
         for text in [
             "/menu",
             "/session",
-            "/model",
             "/context",
             "/help",
             "📱 Menu",
@@ -3844,6 +3235,7 @@ mod update_lane_tests {
     #[test]
     fn generation_prompts_remain_outside_control_lane() {
         for text in [
+            "/model",
             "Jelaskan orbit satelit",
             "/image seekor rubah di kota neon",
             "buatkan gambar pemandangan",
@@ -3854,20 +3246,12 @@ mod update_lane_tests {
 
     #[test]
     fn command_matching_requires_a_real_token_boundary() {
-        assert!(command_matches("/model", "/model"));
-        assert_eq!(command_args("/model gpt-4o", "/model"), Some("gpt-4o"));
-        assert!(command_matches("/model@xiaobot gpt-4o", "/model"));
-        assert!(!command_matches("/modelled", "/model"));
+        assert!(command_matches("/menu", "/menu"));
+        assert_eq!(command_args("/menu settings", "/menu"), Some("settings"));
+        assert!(command_matches("/menu@xiaobot settings", "/menu"));
+        assert!(!command_matches("/menux", "/menu"));
         assert!(!command_matches("/imagegen", "/image"));
         assert!(!command_matches("/startling", "/start"));
-    }
-
-    #[test]
-    fn telegram_model_editing_is_main_only() {
-        assert!(telegram_can_edit_model_role(ai::service::ModelRole::Main));
-        for role in ai::service::ModelRole::addon_roles() {
-            assert!(!telegram_can_edit_model_role(role));
-        }
     }
 
     #[test]

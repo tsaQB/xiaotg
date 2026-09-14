@@ -12,8 +12,8 @@ use super::models::{
     ReplyParameters, RichBlock, Update, User,
 };
 use super::transport_policy::{
-    fallback_allowed_error, fallback_allowed_response, retry_delay_from_error,
-    retry_delay_from_response, MAX_TELEGRAM_ATTEMPTS,
+    fallback_allowed_error, fallback_allowed_response, retry_delay_for_http_status,
+    retry_delay_from_error, retry_delay_from_response, MAX_TELEGRAM_ATTEMPTS,
 };
 
 pub use raw::TelegramDeliveryContext;
@@ -23,6 +23,12 @@ const MAX_TELEGRAM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 tokio::task_local! {
     static REPLACE_CALLBACK_QUERY_MESSAGE: bool;
+}
+
+enum HttpResponseOutcome {
+    Success(Value),
+    Retry { delay: Duration, error: String },
+    TerminalError(String),
 }
 
 #[derive(Clone)]
@@ -174,12 +180,13 @@ impl TelegramBotClient {
     }
 
     async fn read_bounded_json(response: reqwest::Response) -> Result<Value, String> {
+        let status = response.status();
         if response
             .content_length()
             .is_some_and(|length| length > MAX_TELEGRAM_RESPONSE_BYTES as u64)
         {
             return Err(format!(
-                "response exceeded {MAX_TELEGRAM_RESPONSE_BYTES} bytes"
+                "HTTP {status}: response exceeded {MAX_TELEGRAM_RESPONSE_BYTES} bytes"
             ));
         }
         let mut stream = response.bytes_stream();
@@ -188,12 +195,13 @@ impl TelegramBotClient {
             let chunk = chunk.map_err(|error| Self::reqwest_error_kind(&error).to_string())?;
             if bytes.len().saturating_add(chunk.len()) > MAX_TELEGRAM_RESPONSE_BYTES {
                 return Err(format!(
-                    "response exceeded {MAX_TELEGRAM_RESPONSE_BYTES} bytes"
+                    "HTTP {status}: response exceeded {MAX_TELEGRAM_RESPONSE_BYTES} bytes"
                 ));
             }
             bytes.extend_from_slice(&chunk);
         }
-        serde_json::from_slice(&bytes).map_err(|error| format!("invalid JSON: {error}"))
+        serde_json::from_slice(&bytes)
+            .map_err(|error| format!("HTTP {status} invalid JSON: {error}"))
     }
 
     fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
@@ -212,40 +220,100 @@ impl TelegramBotClient {
         }
     }
 
+    async fn evaluate_response(
+        method: &str,
+        response: reqwest::Response,
+        attempt: usize,
+    ) -> HttpResponseOutcome {
+        let status = response.status();
+        let retry_after_header = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok());
+
+        if status.is_server_error() || status.as_u16() == 429 {
+            let retry_suffix = retry_after_header
+                .map(|s| format!(" retry_after={s}s"))
+                .unwrap_or_default();
+            let error_msg = format!(
+                "Telegram API error [{method}] code={}: HTTP {status}{retry_suffix}",
+                status.as_u16()
+            );
+            if let Some(delay) =
+                retry_delay_for_http_status(status.as_u16(), retry_after_header, attempt)
+            {
+                return HttpResponseOutcome::Retry {
+                    delay,
+                    error: error_msg,
+                };
+            }
+            return HttpResponseOutcome::TerminalError(error_msg);
+        }
+
+        match Self::read_bounded_json(response).await {
+            Ok(value) => {
+                if let Some(delay) = retry_delay_from_response(&value, attempt) {
+                    let error = Self::telegram_api_error(method, &value);
+                    return HttpResponseOutcome::Retry { delay, error };
+                }
+                HttpResponseOutcome::Success(value)
+            }
+            Err(error) => {
+                if let Some(delay) = retry_delay_from_error(&error, attempt) {
+                    HttpResponseOutcome::Retry { delay, error }
+                } else {
+                    HttpResponseOutcome::TerminalError(error)
+                }
+            }
+        }
+    }
+
+    fn evaluate_request_error(
+        method: &str,
+        error: &reqwest::Error,
+        is_multipart: bool,
+        attempt: usize,
+    ) -> (Option<Duration>, String) {
+        let normalized = if is_multipart {
+            format!(
+                "{method} multipart error: {}",
+                Self::reqwest_error_kind(error)
+            )
+        } else {
+            format!(
+                "HTTP error for {method}: {}",
+                Self::reqwest_error_kind(error)
+            )
+        };
+        let delay = retry_delay_from_error(&normalized, attempt);
+        (delay, normalized)
+    }
+
     async fn post_json_raw(&self, method: &str, payload: Value) -> Result<Value, String> {
         let url = format!("{}/{method}", self.base_url);
         let mut last_error = None;
         for attempt in 0..MAX_TELEGRAM_ATTEMPTS {
             match self.client.post(&url).json(&payload).send().await {
-                Ok(response) => match Self::read_bounded_json(response).await {
-                    Ok(value) => {
-                        if let Some(delay) = retry_delay_from_response(&value, attempt) {
-                            warn!(
-                                method,
-                                attempt = attempt + 1,
-                                delay_ms = delay.as_millis(),
-                                "Telegram request is transiently rate-limited/unavailable; retrying"
-                            );
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-                        return Ok(value);
+                Ok(response) => match Self::evaluate_response(method, response, attempt).await {
+                    HttpResponseOutcome::Success(value) => return Ok(value),
+                    HttpResponseOutcome::Retry { delay, error } => {
+                        warn!(
+                            method,
+                            attempt = attempt + 1,
+                            delay_ms = delay.as_millis(),
+                            "Telegram request is transiently rate-limited/unavailable; retrying"
+                        );
+                        last_error = Some(error);
+                        tokio::time::sleep(delay).await;
+                        continue;
                     }
-                    Err(error) => {
-                        if let Some(delay) = retry_delay_from_error(&error, attempt) {
-                            last_error = Some(error);
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-                        return Err(error);
-                    }
+                    HttpResponseOutcome::TerminalError(error) => return Err(error),
                 },
                 Err(error) => {
-                    let normalized = format!(
-                        "HTTP error for {method}: {}",
-                        Self::reqwest_error_kind(&error)
-                    );
-                    if let Some(delay) = retry_delay_from_error(&normalized, attempt) {
+                    let (delay, normalized) =
+                        Self::evaluate_request_error(method, &error, false, attempt);
+                    if let Some(delay) = delay {
                         last_error = Some(normalized);
                         tokio::time::sleep(delay).await;
                         continue;
@@ -275,33 +343,30 @@ impl TelegramBotClient {
         for attempt in 0..MAX_TELEGRAM_ATTEMPTS {
             let form = build()?;
             match self.client.post(&url).multipart(form).send().await {
-                Ok(response) => match Self::read_bounded_json(response).await {
-                    Ok(value) => {
+                Ok(response) => match Self::evaluate_response(method, response, attempt).await {
+                    HttpResponseOutcome::Success(value) => {
                         if value.get("ok").and_then(Value::as_bool) == Some(true) {
                             return Ok(value);
                         }
-                        if let Some(delay) = retry_delay_from_response(&value, attempt) {
-                            last_error = Some(Self::telegram_api_error(method, &value));
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
                         return Err(Self::telegram_api_error(method, &value));
                     }
-                    Err(error) => {
-                        if let Some(delay) = retry_delay_from_error(&error, attempt) {
-                            last_error = Some(error);
-                            tokio::time::sleep(delay).await;
-                            continue;
-                        }
-                        return Err(error);
+                    HttpResponseOutcome::Retry { delay, error } => {
+                        warn!(
+                            method,
+                            attempt = attempt + 1,
+                            delay_ms = delay.as_millis(),
+                            "Telegram request is transiently rate-limited/unavailable; retrying"
+                        );
+                        last_error = Some(error);
+                        tokio::time::sleep(delay).await;
+                        continue;
                     }
+                    HttpResponseOutcome::TerminalError(error) => return Err(error),
                 },
                 Err(error) => {
-                    let normalized = format!(
-                        "{method} multipart error: {}",
-                        Self::reqwest_error_kind(&error)
-                    );
-                    if let Some(delay) = retry_delay_from_error(&normalized, attempt) {
+                    let (delay, normalized) =
+                        Self::evaluate_request_error(method, &error, true, attempt);
+                    if let Some(delay) = delay {
                         last_error = Some(normalized);
                         tokio::time::sleep(delay).await;
                         continue;

@@ -71,7 +71,6 @@ cargo run -- gateway             # Manage Telegram Bot Token and OWNER_USER_ID
 cargo run -- provider [add|rm]   # Manage OpenAI-compatible AI providers
 cargo run -- model [query]       # Search and set Main Model
 cargo run -- addon               # Configure multimodal specialist routes (Vision, Video, STT, Image)
-cargo run -- pick                # Configure model whitelist for Telegram /model picker
 cargo run -- probe               # Live capability diagnostic center and probe tester
 cargo run -- help                # Print CLI subcommand reference
 ```
@@ -183,7 +182,7 @@ cargo run -- help                # Print CLI subcommand reference
 
 ### 7. 5-Role Multimodal Model Routing Rules
 - The 5 roles are `Main`, `Vision`, `Video`, `AudioStt`, and `ImageGeneration`.
-- In the Telegram UI (`/model`), only the **Main Model** can be modified. Addon roles are read-only in Telegram and must be configured via the CLI (`xiao addon`).
+- Model configuration is managed purely through the CLI (`xiao model` for the Main Model and `xiao addon` for specialist roles). The Telegram interface remains a focused chat gateway without in-app `/model` command widgets.
 - An addon route configured as `MainModel` dynamically tracks changes to the Main Model. An addon configured as `Specific` or `Disabled` is never overwritten when the Main Model changes.
 - Specialist invocations send only the immediate user input and relevant media to the specialist model; they do not send canonical session history to the specialist. Canonical history is maintained solely with the Main Model.
 
