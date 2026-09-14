@@ -795,15 +795,15 @@ pub(crate) async fn run_cli_gateway_menu() {
                     let owner_str = owner_id
                         .map(|id| format!(" · Owner: {id}"))
                         .unwrap_or_else(|| " · Owner: -".to_string());
-                    format!("● @{uname}{owner_str}")
+                    format!("@{uname}{owner_str}")
                 }
-                _ => "✖ Token Tidak Valid".to_string(),
+                _ => "Token Tidak Valid".to_string(),
             }
         };
 
         let items = vec![
             format!("Telegram [{tg_status}]"),
-            "✕ Selesai / Keluar".to_string(),
+            "Selesai / Keluar".to_string(),
         ];
 
         let sel = terminal_interactive_select("Kelola Gateway Perpesanan:", &items, 0, false, None);
@@ -840,10 +840,10 @@ async fn run_cli_gateway_telegram_submenu() {
         );
 
         let actions = vec![
-            "🔍 Cek Koneksi / Ping Telegram API".to_string(),
-            "🔑 Ubah Telegram Bot Token".to_string(),
-            "👤 Ubah Telegram Owner User ID".to_string(),
-            "← Kembali".to_string(),
+            "Cek Koneksi / Ping Telegram API".to_string(),
+            "Ubah Telegram Bot Token".to_string(),
+            "Ubah Telegram Owner User ID".to_string(),
+            "Kembali".to_string(),
         ];
 
         let sel = terminal_interactive_select(&summary, &actions, 0, false, None);
@@ -1058,9 +1058,9 @@ pub(crate) async fn run_cli_provider_menu(ai_service: &AIChatService, action: Op
             })
             .collect();
 
-        menu_items.push("➕ Tambah Provider Baru".to_string());
-        menu_items.push("🗑️  Hapus Provider".to_string());
-        menu_items.push("✕ Selesai / Keluar".to_string());
+        menu_items.push("Tambah Provider Baru".to_string());
+        menu_items.push("Hapus Provider".to_string());
+        menu_items.push("Selesai / Keluar".to_string());
 
         let sel = terminal_interactive_select("Kelola AI Provider:", &menu_items, 0, false, None);
 
@@ -1098,7 +1098,7 @@ pub(crate) async fn run_cli_provider_menu(ai_service: &AIChatService, action: Op
             }
             sub_actions.push("Pilih / Ganti Model untuk Provider ini".to_string());
             sub_actions.push(format!("Hapus Provider ({})", target_prov.name));
-            sub_actions.push("← Kembali".to_string());
+            sub_actions.push("Kembali".to_string());
 
             let sub_sel = terminal_interactive_select(&title_summary, &sub_actions, 0, false, None);
             let Some(action_idx) = sub_sel else {
@@ -1509,24 +1509,13 @@ pub(crate) async fn run_cli_addon_menu(ai_service: &AIChatService) {
                 .route(role)
                 .cloned()
                 .unwrap_or(ModelRoute::MainModel);
-            let target_str = match &route {
-                ModelRoute::MainModel => "○ Main Model".to_string(),
-                ModelRoute::Disabled => "✖ Disabled".to_string(),
-                ModelRoute::Specific { provider_id, model } => {
-                    let prov_name = providers
-                        .iter()
-                        .find(|p| &p.id == provider_id)
-                        .map(|p| p.name.as_str())
-                        .unwrap_or(provider_id);
-                    format!("◆ {prov_name} :: {model}")
-                }
-            };
+            let target_str = addon_route_text(&route, &providers);
             let label = addon_role_short_label(role);
             menu_items.push(format!("{:<12} [{target_str}]", label));
         }
-        menu_items.push("🧪 Uji Kapabilitas Semua Model Addon Aktif".to_string());
-        menu_items.push("↺ Reset Semua Addon ke Main Model".to_string());
-        menu_items.push("✕ Selesai / Keluar".to_string());
+        menu_items.push("Uji Kapabilitas Semua Model Addon Aktif".to_string());
+        menu_items.push("Reset Semua Addon ke Main Model".to_string());
+        menu_items.push("Selesai / Keluar".to_string());
 
         let sel = terminal_interactive_select(
             "Kelola Addon Multimodal (Pilih Role):",
@@ -1584,10 +1573,10 @@ async fn run_cli_addon_role_submenu(ai_service: &AIChatService, role: ModelRole)
     );
 
     let options = vec![
-        "○ Gunakan Main Model (Inherited / Default)".to_string(),
-        "✖ Nonaktifkan Role Ini (Disabled)".to_string(),
-        "◆ Pilih Model Spesifik dari Provider...".to_string(),
-        "← Kembali".to_string(),
+        "Gunakan Main Model (Inherited / Default)".to_string(),
+        "Nonaktifkan Role Ini (Disabled)".to_string(),
+        "Pilih Model Spesifik dari Provider...".to_string(),
+        "Kembali".to_string(),
     ];
 
     let sel = terminal_interactive_select(&summary, &options, 0, false, None);
@@ -1751,13 +1740,13 @@ pub(crate) async fn run_cli_probe_menu(ai_service: &AIChatService) {
     load_environment();
     loop {
         let menu_items = vec![
-            "🔍 Audit & Refresh Semua Model Aktif".to_string(),
-            "👁️  Uji Spesialis Vision (Live Test)".to_string(),
-            "🎬 Uji Spesialis Video (Live Test)".to_string(),
-            "🎙️  Uji Spesialis Audio STT (Live Test)".to_string(),
-            "🎨 Uji Spesialis Image Gen (Live Test Gambar)".to_string(),
-            "📋 Lihat Cache Kapabilitas SQLite".to_string(),
-            "✕ Selesai / Keluar".to_string(),
+            "Audit & Refresh Semua Model Aktif".to_string(),
+            "Uji Spesialis Vision (Live Test)".to_string(),
+            "Uji Spesialis Video (Live Test)".to_string(),
+            "Uji Spesialis Audio STT (Live Test)".to_string(),
+            "Uji Spesialis Image Gen (Live Test Gambar)".to_string(),
+            "Lihat Cache Kapabilitas SQLite".to_string(),
+            "Selesai / Keluar".to_string(),
         ];
 
         let sel = terminal_interactive_select(
@@ -2221,11 +2210,11 @@ pub(crate) async fn run_cli_ai_hub(
             );
 
             let menu_items = vec![
-                "🎯 Select / Switch Main Model".to_string(),
-                "🔌 Manage Providers (Add / Remove / Switch)".to_string(),
-                "🧩 Manage Multimodal Addons (Vision, STT, Video, Image)".to_string(),
-                "🧪 Run AI Diagnostics (Live Probe)".to_string(),
-                "✕ Exit".to_string(),
+                "Select / Switch Main Model".to_string(),
+                "Manage Providers (Add / Remove / Switch)".to_string(),
+                "Manage Multimodal Addons (Vision, STT, Video, Image)".to_string(),
+                "Run AI Diagnostics (Live Probe)".to_string(),
+                "Exit".to_string(),
             ];
 
             let sel = terminal_interactive_select(&title, &menu_items, 0, false, None);
