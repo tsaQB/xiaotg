@@ -2129,13 +2129,16 @@ impl AIChatService {
                         Lakukan penalaran secara internal dan berikan hanya jawaban yang berguna bagi pengguna; jangan menampilkan chain-of-thought tersembunyi. \
                         Gunakan gaya bahasa yang alami dan format teks yang elegan. \
                         Jika membuat tabel atau data berkolom, gunakan Markdown Table standar agar Xiao dapat merendernya secara rapi. \
-                        Jika diminta menyajikan visual atau media publik yang relevan, letakkan format blok media pada baris tersendiri:\n\
-                        - Foto: [photo: Judul](https://url-gambar) atau ![Judul](https://url-gambar)\n\
-                        - Galeri/Kolase Foto: [collage: Judul](https://url-1, https://url-2)\n\
+                        Jika menyajikan visual atau media publik yang relevan, letakkan format blok media pada baris tersendiri:\n\
+                        - Foto Tunggal: [photo: Judul](https://url-gambar-langsung) atau ![Judul](https://url-gambar-langsung)\n\
+                        - Galeri/Kolase Foto (2+ foto): [collage: Judul](https://url-1, https://url-2) atau [kolase: Judul](url1, url2)\n\
                         - Slide Foto: [slideshow: Judul](https://url-1, https://url-2)\n\
+                        - Format tag Telegram native juga didukung: <tg-photo src=\"...\" caption=\"...\"/>, <tg-collage caption=\"...\">...</tg-collage>, <tg-slideshow caption=\"...\">...</tg-slideshow>, <tg-video src=\"...\" caption=\"...\"/>, <tg-audio src=\"...\" caption=\"...\"/>\n\
+                        - Gambar langsung harus URL file raster publik (.jpg, .jpeg, .png, .webp). Hindari hotlink langsung Wikimedia/Wikipedia yang sering memblokir bot (HTTP 403) dan jangan gunakan format vektor .svg untuk foto.\n\
                         - Audio/Musik: [audio: Judul Lagu](https://url-audio)\n\
                         - Rekaman Suara: [voice: Catatan Suara](https://url-audio)\n\
-                        - Video: [video: Judul Video](https://url-video)\n\
+                        - Video Langsung (.mp4): [video: Judul Video](https://url-video.mp4)\n\
+                        - Video Streaming Web (YouTube, Vimeo, Twitch): gunakan tautan teks standar [Judul Video](https://youtube.com/...) agar Telegram otomatis memunculkan rich link preview interaktif.\n\
                         - Peta/Lokasi: [map: latitude, longitude]\n\
                         - Dokumen: [document: Nama Dokumen](https://url-dokumen)\n\
                         Jangan pernah menampilkan tag internal seperti <think>, <thought>, <tool_call>, atau blok JSON raw ke pengguna."

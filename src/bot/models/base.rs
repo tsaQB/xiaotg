@@ -811,6 +811,112 @@ impl RichBlock {
                 | RichBlock::Document { .. }
         )
     }
+
+    pub fn caption_text(&self) -> Option<String> {
+        let cap = match self {
+            RichBlock::Photo { caption, .. }
+            | RichBlock::Video { caption, .. }
+            | RichBlock::Audio { caption, .. }
+            | RichBlock::VoiceNote { caption, .. }
+            | RichBlock::Animation { caption, .. }
+            | RichBlock::Collage { caption, .. }
+            | RichBlock::Slideshow { caption, .. }
+            | RichBlock::Document { caption, .. } => caption.as_ref()?,
+            _ => return None,
+        };
+        match &cap.text {
+            Value::String(s) => Some(s.clone()),
+            Value::Array(arr) => {
+                let mut out = String::new();
+                for item in arr {
+                    if let Some(s) = item.as_str() {
+                        out.push_str(s);
+                    } else if let Some(s) = item.get("text").and_then(Value::as_str) {
+                        out.push_str(s);
+                    }
+                }
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get_media_urls(&self) -> Vec<String> {
+        let extract = |val: &Value| -> Option<String> {
+            val.get("media")
+                .and_then(Value::as_str)
+                .or_else(|| val.as_str())
+                .map(|s| s.to_string())
+        };
+
+        match self {
+            RichBlock::Photo { photo, .. } => extract(photo).into_iter().collect(),
+            RichBlock::Video { video, .. } => extract(video).into_iter().collect(),
+            RichBlock::Audio { audio, .. } => extract(audio).into_iter().collect(),
+            RichBlock::VoiceNote { voice_note, .. } => extract(voice_note).into_iter().collect(),
+            RichBlock::Animation { animation, .. } => extract(animation).into_iter().collect(),
+            RichBlock::Document { document, .. } => extract(document).into_iter().collect(),
+            RichBlock::Collage { blocks, .. } | RichBlock::Slideshow { blocks, .. } => {
+                let mut urls = Vec::new();
+                for item in blocks {
+                    if let Some(p) = item.get("photo") {
+                        if let Some(u) = extract(p) {
+                            urls.push(u);
+                        }
+                    } else if let Some(v) = item.get("video") {
+                        if let Some(u) = extract(v) {
+                            urls.push(u);
+                        }
+                    } else if let Some(u) = extract(item) {
+                        urls.push(u);
+                    }
+                }
+                urls
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn replace_media_urls<F: Fn(&str) -> Option<String>>(&mut self, replacer: &F) {
+        let mutate = |val: &mut Value| {
+            if let Some(obj) = val.as_object_mut() {
+                if let Some(m) = obj.get("media").and_then(Value::as_str) {
+                    if let Some(new_val) = replacer(m) {
+                        obj.insert("media".to_string(), Value::String(new_val));
+                    }
+                }
+            } else if let Some(s) = val.as_str() {
+                if let Some(new_val) = replacer(s) {
+                    *val = Value::String(new_val);
+                }
+            }
+        };
+
+        match self {
+            RichBlock::Photo { photo, .. } => mutate(photo),
+            RichBlock::Video { video, .. } => mutate(video),
+            RichBlock::Audio { audio, .. } => mutate(audio),
+            RichBlock::VoiceNote { voice_note, .. } => mutate(voice_note),
+            RichBlock::Animation { animation, .. } => mutate(animation),
+            RichBlock::Document { document, .. } => mutate(document),
+            RichBlock::Collage { blocks, .. } | RichBlock::Slideshow { blocks, .. } => {
+                for item in blocks.iter_mut() {
+                    if let Some(p) = item.get_mut("photo") {
+                        mutate(p);
+                    } else if let Some(v) = item.get_mut("video") {
+                        mutate(v);
+                    } else {
+                        mutate(item);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -934,6 +1040,24 @@ impl InputRichMessage {
             media: None,
             is_rtl: None,
             skip_entity_detection: None,
+        }
+    }
+
+    pub fn has_media(&self) -> bool {
+        self.blocks.iter().any(|b| b.is_media())
+    }
+
+    pub fn collect_media_urls(&self) -> Vec<String> {
+        let mut urls = Vec::new();
+        for block in &self.blocks {
+            urls.extend(block.get_media_urls());
+        }
+        urls
+    }
+
+    pub fn replace_media_urls<F: Fn(&str) -> Option<String>>(&mut self, replacer: &F) {
+        for block in &mut self.blocks {
+            block.replace_media_urls(replacer);
         }
     }
 

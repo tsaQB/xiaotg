@@ -403,67 +403,91 @@ pub fn render_terminal_inline(text: &str) -> String {
     s
 }
 
+fn extract_tag_attr<'a>(s: &'a str, attr: &str) -> Option<&'a str> {
+    let needle_double = format!("{attr}=\"");
+    let needle_single = format!("{attr}='");
+    if let Some(rest) = s.split(&needle_double).nth(1) {
+        return rest.split('"').next().map(str::trim);
+    }
+    if let Some(rest) = s.split(&needle_single).nth(1) {
+        return rest.split('\'').next().map(str::trim);
+    }
+    None
+}
+
 fn try_render_terminal_media(line: &str) -> Option<String> {
     let s = line.trim();
     let s_clean = s.trim_end_matches(['.', ',', ';', ':']);
 
     // 1. Telegram native document tag: <tg-document src="..." name="..."/>
-    if let Some(rest) = s.strip_prefix("<tg-document") {
-        let trimmed = rest.trim().trim_end_matches('>').trim_end_matches('/');
-        let link = trimmed
-            .split("src=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .or_else(|| {
-                trimmed
-                    .split("src='")
-                    .nth(1)
-                    .and_then(|s| s.split('\'').next())
-            })
-            .unwrap_or("");
-        let name = trimmed
-            .split("name=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .or_else(|| {
-                trimmed
-                    .split("name='")
-                    .nth(1)
-                    .and_then(|s| s.split('\'').next())
-            })
-            .unwrap_or("");
-        let label = if name.is_empty() { "Dokumen" } else { name };
+    if s.starts_with("<tg-document") {
+        let trimmed = s.trim_end_matches('>').trim_end_matches('/');
+        let link = extract_tag_attr(trimmed, "src").unwrap_or("");
+        let name = extract_tag_attr(trimmed, "name").unwrap_or("Dokumen");
         if !link.is_empty() {
             return Some(format!(
-                "  \x1b[1;38;5;222m📄 [Dokumen: {label}]\x1b[0m \x1b[4;38;5;39m{link}\x1b[0m"
+                "  \x1b[1;38;5;222m📄 [Dokumen: {name}]\x1b[0m \x1b[4;38;5;39m{link}\x1b[0m"
             ));
         }
     }
 
     // 2. Telegram native map tag: <tg-map lat="..." lon="..." title="..."/>
-    if let Some(rest) = s.strip_prefix("<tg-map") {
-        let trimmed = rest.trim().trim_end_matches('>').trim_end_matches('/');
-        let lat = trimmed
-            .split("lat=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .unwrap_or("");
-        let lon = trimmed
-            .split("lon=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .unwrap_or("");
-        let title = trimmed
-            .split("title=\"")
-            .nth(1)
-            .and_then(|s| s.split('"').next())
-            .unwrap_or("Peta");
+    if s.starts_with("<tg-map") {
+        let trimmed = s.trim_end_matches('>').trim_end_matches('/');
+        let lat = extract_tag_attr(trimmed, "lat").unwrap_or("");
+        let lon = extract_tag_attr(trimmed, "lon").unwrap_or("");
+        let title = extract_tag_attr(trimmed, "title").unwrap_or("Peta");
         if !lat.is_empty() && !lon.is_empty() {
             let map_url = format!("https://www.google.com/maps?q={lat},{lon}");
             return Some(format!(
                 "  \x1b[1;38;5;203m📍 [Lokasi: {title}]\x1b[0m \x1b[4;38;5;39m{map_url}\x1b[0m"
             ));
         }
+    }
+
+    // 3. Telegram native photo/image tag: <tg-photo ...>, <img ...>
+    if s.starts_with("<tg-photo") || s.starts_with("<img") {
+        let trimmed = s.trim_end_matches('>').trim_end_matches('/');
+        let link = extract_tag_attr(trimmed, "src").unwrap_or("");
+        let cap = extract_tag_attr(trimmed, "caption")
+            .or_else(|| extract_tag_attr(trimmed, "alt"))
+            .unwrap_or("Foto");
+        if !link.is_empty() {
+            return Some(format!(
+                "  \x1b[1;38;5;117m📷 [Foto: {cap}]\x1b[0m \x1b[4;38;5;39m{link}\x1b[0m"
+            ));
+        }
+    }
+
+    // 4. Telegram native video tag: <tg-video ...>
+    if s.starts_with("<tg-video") {
+        let trimmed = s.trim_end_matches('>').trim_end_matches('/');
+        let link = extract_tag_attr(trimmed, "src").unwrap_or("");
+        let cap = extract_tag_attr(trimmed, "caption").unwrap_or("Video");
+        if !link.is_empty() {
+            return Some(format!(
+                "  \x1b[1;38;5;214m🎬 [Video: {cap}]\x1b[0m \x1b[4;38;5;39m{link}\x1b[0m"
+            ));
+        }
+    }
+
+    // 5. Telegram native audio tag: <tg-audio ...>
+    if s.starts_with("<tg-audio") {
+        let trimmed = s.trim_end_matches('>').trim_end_matches('/');
+        let link = extract_tag_attr(trimmed, "src").unwrap_or("");
+        let cap = extract_tag_attr(trimmed, "caption").unwrap_or("Audio");
+        if !link.is_empty() {
+            return Some(format!(
+                "  \x1b[1;38;5;183m🎵 [Audio: {cap}]\x1b[0m \x1b[4;38;5;39m{link}\x1b[0m"
+            ));
+        }
+    }
+
+    // 6. Telegram native collage / slideshow container tags
+    if s.starts_with("<tg-collage") || s.starts_with("<tg-slideshow") {
+        let trimmed = s.trim_end_matches('>').trim_end_matches('/');
+        let cap = extract_tag_attr(trimmed, "caption").unwrap_or("Galeri Foto");
+        return Some(format!("  \x1b[1;38;5;117m🖼️ [Galeri: {cap}]\x1b[0m"));
     }
 
     // 3. Map: [map: lat, lon] or [map: label](coords)

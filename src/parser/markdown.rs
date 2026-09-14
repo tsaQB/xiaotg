@@ -522,6 +522,28 @@ fn classify_media_tag(tag: &str) -> Option<&'static str> {
     }
 }
 
+pub fn is_streaming_web_video(url: &str) -> bool {
+    let lower = url.to_lowercase();
+    lower.contains("youtube.com/")
+        || lower.contains("youtu.be/")
+        || lower.contains("vimeo.com/")
+        || lower.contains("dailymotion.com/")
+        || lower.contains("twitch.tv/")
+        || lower.contains("tiktok.com/")
+}
+
+fn extract_html_attribute<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
+    let needle_double = format!("{attr}=\"");
+    let needle_single = format!("{attr}='");
+    if let Some(rest) = tag.split(&needle_double).nth(1) {
+        return rest.split('"').next().map(str::trim);
+    }
+    if let Some(rest) = tag.split(&needle_single).nth(1) {
+        return rest.split('\'').next().map(str::trim);
+    }
+    None
+}
+
 fn try_parse_doc_block(line: &str) -> Option<RichBlock> {
     let s = line.trim();
     let s_clean = s.trim_end_matches(['.', ',', ';', ':']);
@@ -644,6 +666,16 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
                                 });
                             }
                             "video" => {
+                                if is_streaming_web_video(link) {
+                                    let cap_text = if label.is_empty() {
+                                        "Tonton Video"
+                                    } else {
+                                        label
+                                    };
+                                    return Some(RichBlock::Paragraph {
+                                        text: parse_inline(&format!("🎬 [{cap_text}]({link})")),
+                                    });
+                                }
                                 return Some(RichBlock::Video {
                                     video: json!({"type": "video", "media": link}),
                                     caption,
@@ -737,6 +769,13 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
                     || link.starts_with("https://")
                     || link.starts_with("tg://")
                 {
+                    if is_streaming_web_video(link) {
+                        let cap_text = if alt.is_empty() { "Tonton Video" } else { alt };
+                        return Some(RichBlock::Paragraph {
+                            text: parse_inline(&format!("🎬 [{cap_text}]({link})")),
+                        });
+                    }
+
                     let clean_url = link.split('?').next().unwrap_or(link);
                     let lower_link = clean_url.to_lowercase();
                     let caption =
@@ -774,7 +813,190 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
         }
     }
 
+    // 3. Telegram native HTML media tags: <tg-photo ...>, <tg-video ...>, <tg-audio ...>, <img ...>
+    if s.starts_with("<tg-photo")
+        || s.starts_with("<tg-video")
+        || s.starts_with("<tg-audio")
+        || s.starts_with("<img")
+    {
+        if let Some(block) = try_parse_html_media_tag(s) {
+            return Some(block);
+        }
+    }
+
     None
+}
+
+fn try_parse_html_media_tag(tag: &str) -> Option<RichBlock> {
+    let s = tag.trim();
+    let src = extract_html_attribute(s, "src").unwrap_or("");
+    if src.is_empty() {
+        return None;
+    }
+    let cap_attr = extract_html_attribute(s, "caption")
+        .or_else(|| extract_html_attribute(s, "alt"))
+        .or_else(|| extract_html_attribute(s, "title"));
+    let inner_text = s
+        .split('>')
+        .nth(1)
+        .and_then(|t| t.split("</").next())
+        .map(str::trim)
+        .filter(|t| !t.is_empty());
+    let caption_text = cap_attr.or(inner_text).unwrap_or("");
+    let caption =
+        (!caption_text.is_empty()).then(|| RichBlockCaption::new(parse_inline(caption_text)));
+
+    if s.starts_with("<tg-photo") || s.starts_with("<img") {
+        return Some(RichBlock::Photo {
+            photo: json!({"type": "photo", "media": src}),
+            caption,
+        });
+    }
+
+    if s.starts_with("<tg-video") {
+        if is_streaming_web_video(src) {
+            let label = if caption_text.is_empty() {
+                "Tonton Video"
+            } else {
+                caption_text
+            };
+            return Some(RichBlock::Paragraph {
+                text: parse_inline(&format!("🎬 [{label}]({src})")),
+            });
+        }
+        return Some(RichBlock::Video {
+            video: json!({"type": "video", "media": src}),
+            caption,
+        });
+    }
+
+    if s.starts_with("<tg-audio") {
+        return Some(RichBlock::Audio {
+            audio: json!({"type": "audio", "media": src}),
+            caption,
+        });
+    }
+
+    None
+}
+
+fn try_parse_container_media_block(
+    lines: &[String],
+    start_idx: usize,
+) -> Option<(RichBlock, usize)> {
+    let first_line = lines[start_idx].trim();
+    let is_html = first_line.starts_with('<');
+    let is_slideshow = first_line.to_lowercase().contains("slideshow");
+
+    let close_tag = if is_html {
+        if is_slideshow {
+            "</tg-slideshow>"
+        } else {
+            "</tg-collage>"
+        }
+    } else if is_slideshow {
+        "[/slideshow]"
+    } else if first_line.to_lowercase().contains("kolase") {
+        "[/kolase]"
+    } else {
+        "[/collage]"
+    };
+
+    let mut collected = Vec::new();
+    let mut i = start_idx;
+    let n = lines.len();
+
+    if is_html && first_line.contains(close_tag) {
+        collected.push(first_line.to_string());
+        i += 1;
+    } else {
+        while i < n {
+            let line = lines[i].trim();
+            collected.push(line.to_string());
+            i += 1;
+            if line.contains(close_tag) {
+                break;
+            }
+        }
+    }
+
+    let full_content = collected.join("\n");
+    let caption_text = if is_html {
+        extract_html_attribute(first_line, "caption")
+            .or_else(|| extract_html_attribute(first_line, "title"))
+            .or_else(|| extract_html_attribute(first_line, "alt"))
+    } else {
+        first_line
+            .strip_prefix('[')
+            .and_then(|s| s.split_once(']'))
+            .map(|(tag_part, _)| tag_part)
+            .and_then(|t| t.split_once(':'))
+            .map(|(_, cap)| cap.trim())
+            .filter(|c| !c.is_empty())
+    };
+
+    let caption = caption_text.map(|c| RichBlockCaption::new(parse_inline(c)));
+
+    let mut sub_blocks = Vec::new();
+    let src_re =
+        Regex::new(r#"(?i)(?:src=["']([^"']+)["']|!?\[[^\]]*\]\(([^)]+)\)|https?://[^\s"'<>()]+)"#)
+            .ok()?;
+    for caps in src_re.captures_iter(&full_content) {
+        let url = caps
+            .get(1)
+            .or_else(|| caps.get(2))
+            .or_else(|| caps.get(0))
+            .map(|m| m.as_str().trim())
+            .unwrap_or("");
+        let clean_url = url.trim_matches(['"', '\'', '<', '>']);
+        if clean_url.starts_with("http://")
+            || clean_url.starts_with("https://")
+            || clean_url.starts_with("tg://")
+        {
+            let lower = clean_url.to_lowercase();
+            if lower.ends_with(".mp4") || lower.ends_with(".webm") || lower.ends_with(".mov") {
+                sub_blocks
+                    .push(json!({"type": "video", "video": {"type": "video", "media": clean_url}}));
+            } else if !lower.ends_with(".html")
+                && !lower.ends_with(".htm")
+                && !is_streaming_web_video(clean_url)
+            {
+                sub_blocks
+                    .push(json!({"type": "photo", "photo": {"type": "photo", "media": clean_url}}));
+            }
+        }
+    }
+
+    if sub_blocks.len() >= 2 {
+        let block = if is_slideshow {
+            RichBlock::Slideshow {
+                blocks: sub_blocks,
+                caption,
+            }
+        } else {
+            RichBlock::Collage {
+                blocks: sub_blocks,
+                caption,
+            }
+        };
+        Some((block, i))
+    } else if sub_blocks.len() == 1 {
+        let first = sub_blocks.pop().unwrap();
+        let block = if first["type"] == "video" {
+            RichBlock::Video {
+                video: first["video"].clone(),
+                caption,
+            }
+        } else {
+            RichBlock::Photo {
+                photo: first["photo"].clone(),
+                caption,
+            }
+        };
+        Some((block, i))
+    } else {
+        None
+    }
 }
 
 pub fn isolate_embedded_media_blocks(text: &str) -> String {
@@ -786,7 +1008,7 @@ pub fn isolate_embedded_media_blocks(text: &str) -> String {
     let mut in_code_block = false;
 
     let media_regex = Regex::new(
-        r#"(?i)(!?\[(?:photo|foto|image|img|gambar|picture|pic|video|vid|audio|musik|music|lagu|song|voice|voicenote|voice_note|suara|rekaman|vn|animation|animasi|gif|collage|kolase|gallery|galeri|album|slideshow|slide|document|dokumen|doc|file|berkas|map|location|lokasi|peta|geo)\s*:[^\]]+\](?:\s*\([^\)]+\))?[.,;:]?|!\[[^\]]*\]\s*\([^\)]+\)[.,;:]?|<tg-(?:document|map)[^>]*/>)"#
+        r#"(?i)(!?\[(?:photo|foto|image|img|gambar|picture|pic|video|vid|audio|musik|music|lagu|song|voice|voicenote|voice_note|suara|rekaman|vn|animation|animasi|gif|collage|kolase|gallery|galeri|album|slideshow|slide|document|dokumen|doc|file|berkas|map|location|lokasi|peta|geo)\s*:[^\]]+\](?:\s*\([^\)]+\))?[.,;:]?|!\[[^\]]*\]\s*\([^\)]+\)[.,;:]?|<tg-(?:photo|video|audio|document|map|collage|slideshow)[^>]*>|</tg-(?:photo|video|audio|document|map|collage|slideshow)>|<img[^>]*>)"#
     ).ok();
 
     for line in text.split('\n') {
@@ -1503,6 +1725,20 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
             if let Some(doc_block) = try_parse_doc_block(stripped) {
                 blocks.push(doc_block);
                 i += 1;
+                continue;
+            }
+        }
+
+        // Multi-line or container Media Block (<tg-collage>...</tg-collage>, etc.)
+        if stripped.starts_with("<tg-collage")
+            || stripped.starts_with("<tg-slideshow")
+            || (stripped.starts_with("[collage") && !stripped.contains('('))
+            || (stripped.starts_with("[kolase") && !stripped.contains('('))
+            || (stripped.starts_with("[slideshow") && !stripped.contains('('))
+        {
+            if let Some((container_block, next_i)) = try_parse_container_media_block(&lines, i) {
+                blocks.push(container_block);
+                i = next_i;
                 continue;
             }
         }
@@ -2246,5 +2482,78 @@ Paragraf normal";
         assert!(!serialized.contains("Internal secret reasoning"));
         assert!(!serialized.contains("tool_call"));
         assert!(serialized.contains("Halo! Ada yang bisa dibantu?"));
+    }
+
+    #[test]
+    fn streaming_video_urls_do_not_produce_raw_video_blocks() {
+        let text = "[video: Belajar Rust](https://www.youtube.com/watch?v=5C_HPTJg5ek)\n\n![Tutorial](https://youtu.be/abc12345)";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 2);
+        // Should parse as Paragraphs with styled links so Telegram link preview works without API 400 rejection
+        assert!(matches!(blocks[0], RichBlock::Paragraph { .. }));
+        assert!(matches!(blocks[1], RichBlock::Paragraph { .. }));
+        let s0 = serde_json::to_string(&blocks[0]).unwrap();
+        let s1 = serde_json::to_string(&blocks[1]).unwrap();
+        assert!(s0.contains("Belajar Rust") && s0.contains("youtube.com"));
+        assert!(s1.contains("Tutorial") && s1.contains("youtu.be"));
+    }
+
+    #[test]
+    fn direct_video_files_produce_native_video_blocks() {
+        let text = "[video: Animasi Robot](https://example.com/demo.mp4)\n\n![Clip](https://example.com/sample.webm)";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(blocks[0], RichBlock::Video { .. }));
+        assert!(matches!(blocks[1], RichBlock::Video { .. }));
+    }
+
+    #[test]
+    fn telegram_html_media_tags_parse_into_rich_blocks() {
+        let text = "<tg-photo src=\"https://example.com/cat.jpg\" caption=\"Kucing Manis\"/>\n\n<tg-audio src=\"https://example.com/audio.mp3\" caption=\"Lagu Pengantar\"/>\n\n<img src=\"https://example.com/pic.png\" alt=\"Foto Profil\">";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[0], RichBlock::Photo { .. }));
+        assert!(matches!(blocks[1], RichBlock::Audio { .. }));
+        assert!(matches!(blocks[2], RichBlock::Photo { .. }));
+        let cap = blocks[0].caption_text().unwrap();
+        assert_eq!(cap, "Kucing Manis");
+    }
+
+    #[test]
+    fn multi_line_tg_collage_and_slideshow_parse_correctly() {
+        let collage_html = r#"<tg-collage caption="Koleksi Logo">
+<tg-photo src="https://example.com/logo1.png"/>
+<tg-photo src="https://example.com/logo2.png"/>
+</tg-collage>"#;
+        let blocks = parse_markdown_to_rich_blocks(collage_html);
+        assert_eq!(blocks.len(), 1);
+        let RichBlock::Collage {
+            blocks: items,
+            caption: _,
+        } = &blocks[0]
+        else {
+            panic!("expected collage block");
+        };
+        assert_eq!(items.len(), 2);
+        assert_eq!(blocks[0].caption_text().as_deref(), Some("Koleksi Logo"));
+
+        let slideshow_html = r#"<tg-slideshow caption="Alur Slide">
+<tg-photo src="https://example.com/s1.jpg"/>
+<tg-photo src="https://example.com/s2.jpg"/>
+</tg-slideshow>"#;
+        let s_blocks = parse_markdown_to_rich_blocks(slideshow_html);
+        assert_eq!(s_blocks.len(), 1);
+        assert!(matches!(s_blocks[0], RichBlock::Slideshow { .. }));
+    }
+
+    #[test]
+    fn multiple_consecutive_photos_parse_into_separate_rich_blocks() {
+        let text = "Berikut logonya:\n\n[photo: Logo Rust](https://example.com/rust.png)\n[photo: Logo Go](https://example.com/go.png)\n[photo: Logo Python](https://example.com/py.png)";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 4);
+        assert!(matches!(blocks[0], RichBlock::Paragraph { .. }));
+        assert!(matches!(blocks[1], RichBlock::Photo { .. }));
+        assert!(matches!(blocks[2], RichBlock::Photo { .. }));
+        assert!(matches!(blocks[3], RichBlock::Photo { .. }));
     }
 }

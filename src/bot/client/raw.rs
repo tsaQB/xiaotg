@@ -1286,9 +1286,30 @@ impl TelegramBotClient {
         receiver_user_id: Option<i64>,
     ) -> Result<Value, String> {
         if attached_files.is_empty() {
-            return self
-                .send_rich_message(chat_id, rich_message, reply_markup, receiver_user_id)
-                .await;
+            let rich_json = serde_json::to_value(rich_message).map_err(|e| e.to_string())?;
+            let mut payload = json!({
+                "chat_id": chat_id,
+                "rich_message": rich_json,
+            });
+            if let Some(ref rm) = reply_markup {
+                payload["reply_markup"] = rm.clone();
+            }
+            if let Some(recv) = receiver_user_id {
+                payload["ephemeral_message_parameters"] =
+                    serde_json::to_value(EphemeralMessageParameters {
+                        receiver_user_id: recv,
+                        callback_query_id: Self::current_delivery_context().callback_query_id,
+                        replace_callback_query_message: None,
+                    })
+                    .unwrap_or(json!({}));
+            }
+            Self::apply_delivery_context(&mut payload, true);
+            let res = self.post_json_raw("sendRichMessage", payload).await?;
+            if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                return Ok(res);
+            } else {
+                return Err(Self::telegram_api_error("sendRichMessage", &res));
+            }
         }
         rich_message.validate()?;
         let rich_json = serde_json::to_string(rich_message).map_err(|e| e.to_string())?;
@@ -1314,6 +1335,11 @@ impl TelegramBotClient {
             })
             .map_err(|e| e.to_string())?;
             form = form.text("ephemeral_message_parameters", ephemeral);
+        }
+        if let Some(source_id) = delivery.source_ephemeral_message_id {
+            let reply_params = serde_json::to_string(&ReplyParameters::ephemeral(source_id))
+                .map_err(|e| e.to_string())?;
+            form = form.text("reply_parameters", reply_params);
         }
 
         for (attach_name, bytes, mime) in attached_files {
@@ -1471,6 +1497,364 @@ impl TelegramBotClient {
         self.post_json("sendMessageDraft", payload).await
     }
 
+    async fn try_recover_rich_message_media(
+        &self,
+        chat_id: i64,
+        rich_message: &InputRichMessage,
+        reply_markup: Option<Value>,
+        receiver_user_id: Option<i64>,
+    ) -> Result<Value, String> {
+        let mut recovered_msg = rich_message.clone();
+        let mut attached_files: Vec<(String, Vec<u8>, String)> = Vec::new();
+        let mut file_idx = 0usize;
+
+        for block in &mut recovered_msg.blocks {
+            match block {
+                RichBlock::Photo { photo, caption } => {
+                    let url = photo
+                        .get("media")
+                        .and_then(Value::as_str)
+                        .or_else(|| photo.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(u) = url {
+                        if u.starts_with("http://") || u.starts_with("https://") {
+                            if let Some((bytes, file_name, mime)) = self
+                                .download_media_bytes(&u, MAX_TELEGRAM_DOWNLOAD_BYTES)
+                                .await
+                            {
+                                let ext = file_name.split('.').next_back().unwrap_or("jpg");
+                                let attach_name = format!("file_{file_idx}.{ext}");
+                                file_idx += 1;
+                                *photo = json!({
+                                    "type": "photo",
+                                    "media": format!("attach://{attach_name}")
+                                });
+                                attached_files.push((attach_name, bytes, mime));
+                            } else {
+                                let cap = caption
+                                    .as_ref()
+                                    .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| "Foto".to_string());
+                                *block = RichBlock::Paragraph {
+                                    text: Value::Array(vec![
+                                        json!("🖼️ "),
+                                        json!({
+                                            "type": "text_link",
+                                            "text": cap,
+                                            "url": u,
+                                        }),
+                                    ]),
+                                };
+                            }
+                        }
+                    }
+                }
+                RichBlock::Video { video, caption } => {
+                    let url = video
+                        .get("media")
+                        .and_then(Value::as_str)
+                        .or_else(|| video.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(u) = url {
+                        if u.starts_with("http://") || u.starts_with("https://") {
+                            if let Some((bytes, file_name, mime)) = self
+                                .download_media_bytes(&u, MAX_TELEGRAM_DOWNLOAD_BYTES)
+                                .await
+                            {
+                                let ext = file_name.split('.').next_back().unwrap_or("mp4");
+                                let attach_name = format!("file_{file_idx}.{ext}");
+                                file_idx += 1;
+                                *video = json!({
+                                    "type": "video",
+                                    "media": format!("attach://{attach_name}")
+                                });
+                                attached_files.push((attach_name, bytes, mime));
+                            } else {
+                                let cap = caption
+                                    .as_ref()
+                                    .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| "Video".to_string());
+                                *block = RichBlock::Paragraph {
+                                    text: Value::Array(vec![
+                                        json!("🎬 "),
+                                        json!({
+                                            "type": "text_link",
+                                            "text": cap,
+                                            "url": u,
+                                        }),
+                                    ]),
+                                };
+                            }
+                        }
+                    }
+                }
+                RichBlock::Audio { audio, caption } => {
+                    let url = audio
+                        .get("media")
+                        .and_then(Value::as_str)
+                        .or_else(|| audio.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(u) = url {
+                        if u.starts_with("http://") || u.starts_with("https://") {
+                            if let Some((bytes, file_name, mime)) = self
+                                .download_media_bytes(&u, MAX_TELEGRAM_DOWNLOAD_BYTES)
+                                .await
+                            {
+                                let ext = file_name.split('.').next_back().unwrap_or("mp3");
+                                let attach_name = format!("file_{file_idx}.{ext}");
+                                file_idx += 1;
+                                *audio = json!({
+                                    "type": "audio",
+                                    "media": format!("attach://{attach_name}")
+                                });
+                                attached_files.push((attach_name, bytes, mime));
+                            } else {
+                                let cap = caption
+                                    .as_ref()
+                                    .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| "Audio".to_string());
+                                *block = RichBlock::Paragraph {
+                                    text: Value::Array(vec![
+                                        json!("🎵 "),
+                                        json!({
+                                            "type": "text_link",
+                                            "text": cap,
+                                            "url": u,
+                                        }),
+                                    ]),
+                                };
+                            }
+                        }
+                    }
+                }
+                RichBlock::Animation { animation, caption } => {
+                    let url = animation
+                        .get("media")
+                        .and_then(Value::as_str)
+                        .or_else(|| animation.as_str())
+                        .map(|s| s.to_string());
+                    if let Some(u) = url {
+                        if u.starts_with("http://") || u.starts_with("https://") {
+                            if let Some((bytes, file_name, mime)) = self
+                                .download_media_bytes(&u, MAX_TELEGRAM_DOWNLOAD_BYTES)
+                                .await
+                            {
+                                let ext = file_name.split('.').next_back().unwrap_or("gif");
+                                let attach_name = format!("file_{file_idx}.{ext}");
+                                file_idx += 1;
+                                *animation = json!({
+                                    "type": "animation",
+                                    "media": format!("attach://{attach_name}")
+                                });
+                                attached_files.push((attach_name, bytes, mime));
+                            } else {
+                                let cap = caption
+                                    .as_ref()
+                                    .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| "Animasi".to_string());
+                                *block = RichBlock::Paragraph {
+                                    text: Value::Array(vec![
+                                        json!("🎞️ "),
+                                        json!({
+                                            "type": "text_link",
+                                            "text": cap,
+                                            "url": u,
+                                        }),
+                                    ]),
+                                };
+                            }
+                        }
+                    }
+                }
+                RichBlock::Collage {
+                    blocks: items,
+                    caption,
+                } => {
+                    let mut valid_items = Vec::new();
+                    let mut failed_urls = Vec::new();
+                    for item in items.iter() {
+                        let sub_url = item
+                            .get("photo")
+                            .and_then(|p| p.get("media"))
+                            .and_then(Value::as_str)
+                            .or_else(|| item.get("media").and_then(Value::as_str))
+                            .map(|s| s.to_string());
+                        if let Some(u) = sub_url {
+                            if u.starts_with("http://") || u.starts_with("https://") {
+                                if let Some((bytes, file_name, mime)) = self
+                                    .download_media_bytes(&u, MAX_TELEGRAM_DOWNLOAD_BYTES)
+                                    .await
+                                {
+                                    let ext = file_name.split('.').next_back().unwrap_or("jpg");
+                                    let attach_name = format!("file_{file_idx}.{ext}");
+                                    file_idx += 1;
+                                    valid_items.push(json!({
+                                        "type": "photo",
+                                        "photo": {
+                                            "type": "photo",
+                                            "media": format!("attach://{attach_name}")
+                                        }
+                                    }));
+                                    attached_files.push((attach_name, bytes, mime));
+                                } else {
+                                    failed_urls.push(u);
+                                }
+                            } else {
+                                valid_items.push(item.clone());
+                            }
+                        } else {
+                            valid_items.push(item.clone());
+                        }
+                    }
+
+                    if valid_items.len() >= 2 {
+                        *items = valid_items;
+                    } else if valid_items.len() == 1 {
+                        let single_item = valid_items.pop().unwrap();
+                        let media_val = single_item.get("photo").cloned().unwrap_or(single_item);
+                        *block = RichBlock::Photo {
+                            photo: media_val,
+                            caption: caption.clone(),
+                        };
+                    } else {
+                        let cap_str = caption
+                            .as_ref()
+                            .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "Galeri Foto".to_string());
+                        let mut text_parts = vec![json!(format!("🖼️ [{cap_str}]: "))];
+                        for (idx, u) in failed_urls.into_iter().enumerate() {
+                            if idx > 0 {
+                                text_parts.push(json!(" • "));
+                            }
+                            text_parts.push(json!({
+                                "type": "text_link",
+                                "text": format!("Foto #{}", idx + 1),
+                                "url": u,
+                            }));
+                        }
+                        *block = RichBlock::Paragraph {
+                            text: Value::Array(text_parts),
+                        };
+                    }
+                }
+                RichBlock::Slideshow {
+                    blocks: items,
+                    caption,
+                } => {
+                    let mut valid_items = Vec::new();
+                    let mut failed_urls = Vec::new();
+                    for item in items.iter() {
+                        let sub_url = item
+                            .get("photo")
+                            .and_then(|p| p.get("media"))
+                            .and_then(Value::as_str)
+                            .or_else(|| item.get("media").and_then(Value::as_str))
+                            .map(|s| s.to_string());
+                        if let Some(u) = sub_url {
+                            if u.starts_with("http://") || u.starts_with("https://") {
+                                if let Some((bytes, file_name, mime)) = self
+                                    .download_media_bytes(&u, MAX_TELEGRAM_DOWNLOAD_BYTES)
+                                    .await
+                                {
+                                    let ext = file_name.split('.').next_back().unwrap_or("jpg");
+                                    let attach_name = format!("file_{file_idx}.{ext}");
+                                    file_idx += 1;
+                                    valid_items.push(json!({
+                                        "type": "photo",
+                                        "photo": {
+                                            "type": "photo",
+                                            "media": format!("attach://{attach_name}")
+                                        }
+                                    }));
+                                    attached_files.push((attach_name, bytes, mime));
+                                } else {
+                                    failed_urls.push(u);
+                                }
+                            } else {
+                                valid_items.push(item.clone());
+                            }
+                        } else {
+                            valid_items.push(item.clone());
+                        }
+                    }
+
+                    if valid_items.len() >= 2 {
+                        *items = valid_items;
+                    } else if valid_items.len() == 1 {
+                        let single_item = valid_items.pop().unwrap();
+                        let media_val = single_item.get("photo").cloned().unwrap_or(single_item);
+                        *block = RichBlock::Photo {
+                            photo: media_val,
+                            caption: caption.clone(),
+                        };
+                    } else {
+                        let cap_str = caption
+                            .as_ref()
+                            .map(|c| self.rich_caption_to_plain(&Some(c.clone())))
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "Slideshow".to_string());
+                        let mut text_parts = vec![json!(format!("🖼️ [{cap_str}]: "))];
+                        for (idx, u) in failed_urls.into_iter().enumerate() {
+                            if idx > 0 {
+                                text_parts.push(json!(" • "));
+                            }
+                            text_parts.push(json!({
+                                "type": "text_link",
+                                "text": format!("Slide #{}", idx + 1),
+                                "url": u,
+                            }));
+                        }
+                        *block = RichBlock::Paragraph {
+                            text: Value::Array(text_parts),
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !attached_files.is_empty() {
+            self.send_rich_message_with_media(
+                chat_id,
+                &recovered_msg,
+                attached_files,
+                reply_markup,
+                receiver_user_id,
+            )
+            .await
+        } else {
+            let rich_json = serde_json::to_value(&recovered_msg).map_err(|e| e.to_string())?;
+            let mut payload = json!({
+                "chat_id": chat_id,
+                "rich_message": rich_json,
+            });
+            if let Some(ref rm) = reply_markup {
+                payload["reply_markup"] = rm.clone();
+            }
+            if let Some(recv) = receiver_user_id {
+                payload["ephemeral_message_parameters"] =
+                    serde_json::to_value(EphemeralMessageParameters {
+                        receiver_user_id: recv,
+                        callback_query_id: Self::current_delivery_context().callback_query_id,
+                        replace_callback_query_message: None,
+                    })
+                    .unwrap_or(json!({}));
+            }
+            Self::apply_delivery_context(&mut payload, true);
+            let res = self.post_json_raw("sendRichMessage", payload).await?;
+            if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) {
+                Ok(res)
+            } else {
+                Err(Self::telegram_api_error("sendRichMessage", &res))
+            }
+        }
+    }
+
     pub async fn send_rich_message(
         &self,
         chat_id: i64,
@@ -1503,9 +1887,34 @@ impl TelegramBotClient {
                 Ok(res) if res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false) => {
                     return Ok(res);
                 }
-                Ok(_) => info!("Telegram rejected Rich Message; degrading to safe HTML."),
+                Ok(res) => {
+                    let desc = res
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    info!("Telegram rejected Rich Message ({desc}); checking media recovery.");
+                }
                 Err(error) => {
-                    info!("Rich Message request failed ({error}); degrading to safe HTML.")
+                    info!("Rich Message request failed ({error}); checking media recovery.");
+                }
+            }
+
+            if rich_message.has_media() {
+                match self
+                    .try_recover_rich_message_media(
+                        chat_id,
+                        rich_message,
+                        reply_markup.clone(),
+                        receiver_user_id,
+                    )
+                    .await
+                {
+                    Ok(res) => return Ok(res),
+                    Err(recovery_err) => {
+                        info!(
+                            "Rich Message media recovery unviable ({recovery_err}); degrading to safe HTML."
+                        );
+                    }
                 }
             }
         } else if let Err(error) = validation {
