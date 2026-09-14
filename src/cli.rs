@@ -877,13 +877,15 @@ pub(crate) async fn run_cli_gateway_hub(action: Option<&str>, target: Option<&st
             println!("  xiao gateway [action] [target]\n");
             println!("\x1b[1;37mSubcommands for 'gateway':\x1b[0m");
             println!(
-                "  \x1b[36mxiao gateway\x1b[0m                Open Interactive Gateway Manager"
+                "     \x1b[36mxiao gateway\x1b[0m                Open Interactive Gateway Manager"
             );
-            println!("  \x1b[36mxiao gateway check\x1b[0m          Verify bot token connectivity (getMe)");
+            println!("     \x1b[36mxiao gateway check\x1b[0m          Verify bot token connectivity (getMe)");
             println!(
-                "  \x1b[36mxiao gateway token <TOKEN>\x1b[0m  Bind and verify Telegram Bot Token"
+                "     \x1b[36mxiao gateway token <TOKEN>\x1b[0m  Bind and verify Telegram Bot Token"
             );
-            println!("  \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID\n");
+            println!(
+                "     \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID\n"
+            );
         }
         Some(unknown) => {
             println!("\x1b[31m✖ Error: Sub-perintah 'gateway {unknown}' tidak dikenal.\x1b[0m");
@@ -2420,15 +2422,15 @@ pub(crate) async fn run_cli_ai_hub(
             println!("\x1b[1;37mUsage:\x1b[0m");
             println!("  xiao ai [action]\n");
             println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
-            println!("  \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
-            println!("  \x1b[36mxiao ai use <model>\x1b[0m Switch Main Model directly");
-            println!("  \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models");
+            println!("     \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
+            println!("     \x1b[36mxiao ai use <model>\x1b[0m Switch Main Model directly");
+            println!("     \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models");
             println!(
-                "  \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider"
+                "     \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider"
             );
-            println!("  \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
-            println!("  \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
-            println!("  \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
+            println!("     \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
+            println!("     \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
+            println!("     \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
         }
         Some(unknown) => {
             println!("\x1b[31m✖ Error: Sub-perintah 'ai {unknown}' tidak dikenal.\x1b[0m");
@@ -2455,18 +2457,22 @@ pub(crate) fn print_cli_help() {
     println!("  \x1b[36mversion, -v\x1b[0m         Display binary version");
     println!("  \x1b[36mhelp\x1b[0m                Show this help message\n");
     println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
-    println!("  \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
-    println!("  \x1b[36mxiao ai use <model>\x1b[0m Switch Main Model directly");
-    println!("  \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models");
-    println!("  \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider");
-    println!("  \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
-    println!("  \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
-    println!("  \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
+    println!("     \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
+    println!("     \x1b[36mxiao ai use <model>\x1b[0m Switch Main Model directly");
+    println!(
+        "     \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models"
+    );
+    println!("     \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider");
+    println!("     \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
+    println!("     \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
+    println!("     \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
     println!("\x1b[1;37mSubcommands for 'gateway':\x1b[0m");
-    println!("  \x1b[36mxiao gateway\x1b[0m                Open Interactive Gateway Manager");
-    println!("  \x1b[36mxiao gateway check\x1b[0m          Verify bot token connectivity (getMe)");
-    println!("  \x1b[36mxiao gateway token <TOKEN>\x1b[0m  Bind and verify Telegram Bot Token");
-    println!("  \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID\n");
+    println!("     \x1b[36mxiao gateway\x1b[0m                Open Interactive Gateway Manager");
+    println!(
+        "     \x1b[36mxiao gateway check\x1b[0m          Verify bot token connectivity (getMe)"
+    );
+    println!("     \x1b[36mxiao gateway token <TOKEN>\x1b[0m  Bind and verify Telegram Bot Token");
+    println!("     \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID\n");
 }
 
 #[cfg(test)]
