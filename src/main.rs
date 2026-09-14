@@ -2936,19 +2936,6 @@ async fn main() {
             run_cli_gateway_hub(action_arg, target_arg).await;
             return;
         }
-        "completion" => {
-            let shell_arg = args.get(2).map(|s| s.as_str()).unwrap_or("bash");
-            print_cli_completion(shell_arg);
-            return;
-        }
-        "__complete_models" => {
-            print_cli_complete_models();
-            return;
-        }
-        "__complete_providers" => {
-            print_cli_complete_providers();
-            return;
-        }
         "doctor" | "probe" => {
             run_cli_probe_menu(&ai_service).await;
             return;

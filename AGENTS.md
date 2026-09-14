@@ -75,7 +75,6 @@ cargo run -- ai rm               # Remove an existing provider
 cargo run -- ai addon            # Configure multimodal specialist routes (Vision, Video, STT, Image)
 cargo run -- ai test             # Open live diagnostic probe center (or test: vision, stt, video, image, all)
 cargo run -- gateway             # Manage Telegram Bot Token and OWNER_USER_ID (check, token, owner)
-cargo run -- completion [shell]  # Generate shell completion script (bash or zsh)
 cargo run -- version             # Print binary version (-v, --version)
 cargo run -- help                # Print CLI subcommand reference
 # Backward-compatibility aliases:
