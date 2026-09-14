@@ -31,10 +31,35 @@ pub fn parse_inline(input_str: &str) -> Value {
             normalized = re.replace_all(&normalized, "++${1}++").into_owned();
         }
     }
+    if normalized.contains("<b") || normalized.contains("<strong") {
+        if let Ok(re) = Regex::new(r"(?is)<(?:b|strong)(?:\s+[^>]*)?>(.*?)</(?:b|strong)>") {
+            normalized = re.replace_all(&normalized, "**$1**").into_owned();
+        }
+    }
+    if normalized.contains("<i") || normalized.contains("<em") {
+        if let Ok(re) = Regex::new(r"(?is)<(?:i|em)(?:\s+[^>]*)?>(.*?)</(?:i|em)>") {
+            normalized = re.replace_all(&normalized, "*$1*").into_owned();
+        }
+    }
+    if normalized.contains("<code") {
+        if let Ok(re) = Regex::new(r"(?is)<code(?:\s+[^>]*)?>(.*?)</code>") {
+            normalized = re.replace_all(&normalized, "`$1`").into_owned();
+        }
+    }
+    if normalized.contains("<a ") || normalized.contains("<a>") {
+        if let Ok(re) = Regex::new(r#"(?is)<a\s+[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"#) {
+            normalized = re.replace_all(&normalized, "[$2]($1)").into_owned();
+        }
+    }
+    if normalized.contains("<br") {
+        if let Ok(re) = Regex::new(r"(?i)<br\s*/?>") {
+            normalized = re.replace_all(&normalized, "\n").into_owned();
+        }
+    }
 
     // Clean leaked HTML tags
     let cleaned =
-        Regex::new(r"(?i)</?(?:b|i|s|u|code|pre|blockquote|a|tg-spoiler|span|p|div)(?:\s+[^>]*)?>")
+        Regex::new(r"(?i)</?(?:b|strong|i|em|s|strike|del|u|ins|code|pre|blockquote|a|tg-spoiler|span|p|div|mark|kbd)(?:\s+[^>]*)?>")
             .map(|regex| regex.replace_all(&normalized, "").into_owned())
             .unwrap_or_else(|_| normalized);
     let unescaped = html_escape::decode_html_entities(&cleaned).to_string();
@@ -151,19 +176,58 @@ pub fn parse_inline(input_str: &str) -> Value {
             }
         }
 
-        // 6. Links [text](url)
+        // 6a. Markdown image ![alt](url)
+        if rest.starts_with("![") {
+            if let Some(close) = rest.find("](") {
+                if let Some(end) = rest[close + 2..].find(')') {
+                    let raw_url = &rest[close + 2..close + 2 + end];
+                    let url = raw_url
+                        .trim()
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .trim();
+                    if url.starts_with("https://")
+                        || url.starts_with("http://")
+                        || url.starts_with("tg://")
+                    {
+                        let alt = &rest[2..close];
+                        let alt_trimmed = alt.trim();
+                        let display_label = if alt_trimmed.is_empty() {
+                            "📷 Foto".to_string()
+                        } else {
+                            format!("📷 {alt_trimmed}")
+                        };
+                        out.push(json!({
+                            "type": "url",
+                            "text": parse_inline(&display_label),
+                            "url": url
+                        }));
+                        rest = &rest[close + 3 + end..];
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // 6b. Links [text](url)
         if rest.starts_with('[') {
             if let Some(close) = rest.find("](") {
                 if let Some(end) = rest[close + 2..].find(')') {
-                    let url = &rest[close + 2..close + 2 + end];
+                    let raw_url = &rest[close + 2..close + 2 + end];
+                    let url = raw_url
+                        .trim()
+                        .trim_start_matches('<')
+                        .trim_end_matches('>')
+                        .trim();
                     if url.starts_with("https://")
                         || url.starts_with("http://")
                         || url.starts_with("tg://")
                     {
                         let inner = &rest[1..close];
+                        let display_label = normalize_inline_media_label(inner);
                         out.push(json!({
                             "type": "url",
-                            "text": parse_inline(inner),
+                            "text": parse_inline(&display_label),
                             "url": url
                         }));
                         rest = &rest[close + 3 + end..];
@@ -207,7 +271,9 @@ pub fn parse_inline(input_str: &str) -> Value {
 
         // 9. Plain text chunk until next token
         let mut next_pos = rest.len();
-        for delim in &["**", "__", "||", "~~", "++", "`", "*", "_", "[", "$", r"\("] {
+        for delim in &[
+            "**", "__", "||", "~~", "++", "`", "*", "_", "![", "[", "$", r"\(",
+        ] {
             if let Some(idx) = rest.find(delim) {
                 if idx > 0 && idx < next_pos {
                     next_pos = idx;
@@ -247,6 +313,44 @@ pub fn parse_inline(input_str: &str) -> Value {
     }
 }
 
+fn normalize_inline_media_label(label: &str) -> String {
+    let t = label.trim();
+    if let Some((tag, rest)) = t.split_once(':') {
+        let tag_clean = tag.trim().to_lowercase();
+        let rest_clean = rest.trim();
+        let name = if rest_clean.is_empty() {
+            tag.trim()
+        } else {
+            rest_clean
+        };
+        match tag_clean.as_str() {
+            "photo" | "foto" | "image" | "img" | "gambar" | "picture" | "pic" => {
+                return format!("📷 {name}");
+            }
+            "video" | "vid" => {
+                return format!("🎬 {name}");
+            }
+            "audio" | "musik" | "music" | "lagu" | "song" => {
+                return format!("🎵 {name}");
+            }
+            "voice" | "voicenote" | "voice_note" | "suara" | "rekaman" | "vn" => {
+                return format!("🎙️ {name}");
+            }
+            "animation" | "animasi" | "gif" => {
+                return format!("🎞️ {name}");
+            }
+            "document" | "dokumen" | "doc" | "file" | "berkas" => {
+                return format!("📄 {name}");
+            }
+            "map" | "location" | "lokasi" | "peta" | "geo" => {
+                return format!("📍 {name}");
+            }
+            _ => {}
+        }
+    }
+    t.to_string()
+}
+
 fn is_border_line(line: &str) -> bool {
     let s = line.trim();
     if s.is_empty() {
@@ -256,24 +360,91 @@ fn is_border_line(line: &str) -> bool {
         .all(|c| "┌╔┏┬┰├┝┼╂└╚┗┴┸┤┥─━═+-=_ \t┐┘┒┙╗╝┚┖┓┛│|║┃".contains(c))
 }
 
-fn try_parse_map_block(line: &str) -> Option<RichBlock> {
-    let s = line.trim();
-    if let Some(inner) = s
-        .strip_prefix("[map:")
-        .or_else(|| s.strip_prefix("[location:"))
-        .and_then(|r| r.strip_suffix(']'))
-    {
-        let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
-        if parts.len() >= 2 {
-            let lat = parts[0].parse::<f64>().ok()?;
-            let lon = parts[1].parse::<f64>().ok()?;
-            let zoom = parts.get(2).and_then(|z| {
+fn parse_coords_pair(text: &str) -> Option<(f64, f64, Option<i32>)> {
+    let clean = text.trim().trim_matches(['(', ')', '[', ']']);
+    let clean = clean.strip_prefix("geo:").unwrap_or(clean);
+    let (coords_part, zoom_part) = if let Some((c, z)) = clean.split_once("?z=") {
+        (c, z.parse::<i32>().ok())
+    } else if let Some((c, z)) = clean.split_once("zoom=") {
+        (c.trim_end_matches([',', ' ']), z.parse::<i32>().ok())
+    } else {
+        (clean, None)
+    };
+    let parts: Vec<&str> = coords_part.split(',').map(str::trim).collect();
+    if parts.len() >= 2 {
+        let lat = parts[0].parse::<f64>().ok()?;
+        let lon = parts[1].parse::<f64>().ok()?;
+        let zoom = zoom_part.or_else(|| {
+            parts.get(2).and_then(|z| {
                 z.strip_prefix("zoom=")
                     .unwrap_or(z)
                     .trim()
                     .parse::<i32>()
                     .ok()
-            });
+            })
+        });
+        return Some((lat, lon, zoom));
+    }
+    None
+}
+
+fn try_parse_map_block(line: &str) -> Option<RichBlock> {
+    let s = line.trim();
+    let s_clean = s.trim_end_matches(['.', ',', ';', ':']);
+
+    // Tag based: [map: ...], [location: ...], [lokasi: ...], [peta: ...], [geo: ...]
+    let candidate = s_clean.strip_prefix('!').unwrap_or(s_clean);
+    if candidate.starts_with('[') {
+        if let Some(bracket_end) = candidate.find(']') {
+            let tag_part = &candidate[1..bracket_end];
+            if let Some((tag_name, label)) = tag_part.split_once(':') {
+                let t = tag_name.trim().to_lowercase();
+                if matches!(t.as_str(), "map" | "location" | "lokasi" | "peta" | "geo") {
+                    let right = candidate[bracket_end + 1..].trim();
+                    let right_clean = right.trim_end_matches(['.', ',', ';', ':', ' ']);
+                    let coords_source = if let Some(inner) = right_clean
+                        .strip_prefix('(')
+                        .and_then(|r| r.strip_suffix(')'))
+                    {
+                        let link = inner
+                            .trim()
+                            .trim_start_matches('<')
+                            .trim_end_matches('>')
+                            .trim();
+                        if link.starts_with("http") {
+                            link.split("?q=").nth(1).unwrap_or(link)
+                        } else {
+                            link
+                        }
+                    } else {
+                        label.trim()
+                    };
+
+                    if let Some((lat, lon, zoom)) = parse_coords_pair(coords_source) {
+                        return Some(RichBlock::Map {
+                            location: Location {
+                                latitude: lat,
+                                longitude: lon,
+                                horizontal_accuracy: None,
+                            },
+                            zoom,
+                            width: None,
+                            height: None,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // ![map](geo:...) or ![location](geo:...)
+    if let Some(geo) = s_clean
+        .strip_prefix("![map](geo:")
+        .or_else(|| s_clean.strip_prefix("![location](geo:"))
+        .or_else(|| s_clean.strip_prefix("![lokasi](geo:"))
+        .and_then(|r| r.strip_suffix(')'))
+    {
+        if let Some((lat, lon, zoom)) = parse_coords_pair(geo) {
             return Some(RichBlock::Map {
                 location: Location {
                     latitude: lat,
@@ -285,49 +456,109 @@ fn try_parse_map_block(line: &str) -> Option<RichBlock> {
                 height: None,
             });
         }
-    } else if let Some(geo) = s
-        .strip_prefix("![map](geo:")
-        .or_else(|| s.strip_prefix("![location](geo:"))
-        .and_then(|r| r.strip_suffix(')'))
-    {
-        let (coords, zoom_part) = match geo.split_once("?z=") {
-            Some((c, z)) => (c, z.parse::<i32>().ok()),
-            None => (geo, None),
-        };
-        let (lat_s, lon_s) = coords.split_once(',')?;
-        let lat = lat_s.trim().parse::<f64>().ok()?;
-        let lon = lon_s.trim().parse::<f64>().ok()?;
+    }
+
+    // <tg-map lat="..." lon="..."/>
+    if let Some(rest) = s.strip_prefix("<tg-map") {
+        let trimmed = rest.trim().trim_end_matches('>').trim_end_matches('/');
+        let lat_s = trimmed
+            .split("lat=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        let lon_s = trimmed
+            .split("lon=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        let zoom_s = trimmed
+            .split("zoom=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        let lat = lat_s.parse::<f64>().ok()?;
+        let lon = lon_s.parse::<f64>().ok()?;
+        let zoom = zoom_s.parse::<i32>().ok();
         return Some(RichBlock::Map {
             location: Location {
                 latitude: lat,
                 longitude: lon,
                 horizontal_accuracy: None,
             },
-            zoom: zoom_part,
+            zoom,
             width: None,
             height: None,
         });
     }
+
     None
 }
 
 fn split_bracket_and_parenthesis(text: &str) -> Option<(&str, &str)> {
     let (left, right) = text.split_once(']')?;
     let right = right.trim();
-    let inner_right = right.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let right_cleaned = right.trim_end_matches(['.', ',', ';', ':', ' ']);
+    let inner_right = right_cleaned.strip_prefix('(')?.strip_suffix(')')?.trim();
+    let inner_right = inner_right
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim();
     Some((left.trim(), inner_right))
+}
+
+fn classify_media_tag(tag: &str) -> Option<&'static str> {
+    let t = tag.trim().to_lowercase();
+    match t.as_str() {
+        "photo" | "foto" | "image" | "img" | "gambar" | "picture" | "pic" => Some("photo"),
+        "video" | "vid" => Some("video"),
+        "audio" | "musik" | "music" | "lagu" | "song" => Some("audio"),
+        "voice" | "voicenote" | "voice_note" | "suara" | "rekaman" | "vn" => Some("voice"),
+        "animation" | "animasi" | "gif" => Some("animation"),
+        "collage" | "kolase" | "gallery" | "galeri" | "album" => Some("collage"),
+        "slideshow" | "slide" => Some("slideshow"),
+        "document" | "dokumen" | "doc" | "file" | "berkas" => Some("document"),
+        "map" | "location" | "lokasi" | "peta" | "geo" => Some("map"),
+        _ => None,
+    }
 }
 
 fn try_parse_doc_block(line: &str) -> Option<RichBlock> {
     let s = line.trim();
-    if let Some(rest) = s.strip_prefix("[document:") {
-        if let Some((name, link)) = split_bracket_and_parenthesis(rest) {
-            return Some(RichBlock::Document {
-                document: json!({"type": "document", "media": link}),
-                caption: (!name.is_empty()).then(|| RichBlockCaption::new(parse_inline(name))),
-            });
+    let s_clean = s.trim_end_matches(['.', ',', ';', ':']);
+
+    if s_clean.starts_with('[') || s_clean.starts_with("![") {
+        let candidate = s_clean.strip_prefix('!').unwrap_or(s_clean);
+        if let Some(bracket_end) = candidate.find(']') {
+            let tag_part = &candidate[1..bracket_end];
+            if let Some((tag_name, name)) = tag_part.split_once(':') {
+                let t = tag_name.trim().to_lowercase();
+                if matches!(
+                    t.as_str(),
+                    "document" | "dokumen" | "doc" | "file" | "berkas"
+                ) {
+                    let right = candidate[bracket_end + 1..].trim();
+                    let right_clean = right.trim_end_matches(['.', ',', ';', ':', ' ']);
+                    if let Some(inner) = right_clean
+                        .strip_prefix('(')
+                        .and_then(|r| r.strip_suffix(')'))
+                    {
+                        let link = inner
+                            .trim()
+                            .trim_start_matches('<')
+                            .trim_end_matches('>')
+                            .trim();
+                        let name = name.trim();
+                        return Some(RichBlock::Document {
+                            document: json!({"type": "document", "media": link}),
+                            caption: (!name.is_empty())
+                                .then(|| RichBlockCaption::new(parse_inline(name))),
+                        });
+                    }
+                }
+            }
         }
     }
+
     if let Some(rest) = s.strip_prefix("<tg-document") {
         let trimmed = rest.trim().trim_end_matches('>').trim_end_matches('/');
         let link = trimmed
@@ -364,99 +595,150 @@ fn try_parse_doc_block(line: &str) -> Option<RichBlock> {
 
 fn try_parse_media_block(line: &str) -> Option<RichBlock> {
     let s = line.trim();
-    let prefixes = [
-        ("[photo:", "photo"),
-        ("![photo:", "photo"),
-        ("[video:", "video"),
-        ("![video:", "video"),
-        ("[audio:", "audio"),
-        ("![audio:", "audio"),
-        ("[voice:", "voice"),
-        ("[voicenote:", "voice"),
-        ("[animation:", "animation"),
-        ("![animation:", "animation"),
-    ];
+    let s_clean = s.trim_end_matches(['.', ',', ';', ':']);
 
-    for (prefix, kind) in prefixes {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            if let Some((name, link)) = split_bracket_and_parenthesis(rest) {
-                let caption = (!name.is_empty()).then(|| RichBlockCaption::new(parse_inline(name)));
-                let payload = json!({"type": kind, "media": link});
-                return match kind {
-                    "photo" => Some(RichBlock::Photo {
-                        photo: payload,
-                        caption,
-                    }),
-                    "video" => Some(RichBlock::Video {
-                        video: payload,
-                        caption,
-                    }),
-                    "audio" => Some(RichBlock::Audio {
-                        audio: payload,
-                        caption,
-                    }),
-                    "voice" => Some(RichBlock::VoiceNote {
-                        voice_note: payload,
-                        caption,
-                    }),
-                    "animation" => Some(RichBlock::Animation {
-                        animation: payload,
-                        caption,
-                    }),
-                    _ => None,
-                };
+    // 1. Bracketed media tags [photo: ...] or ![photo: ...]
+    let candidate = s_clean.strip_prefix('!').unwrap_or(s_clean).trim_start();
+    if candidate.starts_with('[') {
+        if let Some(bracket_end) = candidate.find(']') {
+            let tag_part = &candidate[1..bracket_end];
+            if let Some((tag_name, label)) = tag_part.split_once(':') {
+                if let Some(kind) = classify_media_tag(tag_name) {
+                    let label = label.trim();
+                    let right = candidate[bracket_end + 1..].trim();
+                    let right_clean = right.trim_end_matches(['.', ',', ';', ':', ' ']);
+
+                    // Map without parenthesis: [map: -6.2, 106.8]
+                    if kind == "map" && right_clean.is_empty() {
+                        if let Some((lat, lon, zoom)) = parse_coords_pair(label) {
+                            return Some(RichBlock::Map {
+                                location: Location {
+                                    latitude: lat,
+                                    longitude: lon,
+                                    horizontal_accuracy: None,
+                                },
+                                zoom,
+                                width: None,
+                                height: None,
+                            });
+                        }
+                    }
+
+                    if let Some(inner_right) = right_clean
+                        .strip_prefix('(')
+                        .and_then(|r| r.strip_suffix(')'))
+                    {
+                        let link = inner_right
+                            .trim()
+                            .trim_start_matches('<')
+                            .trim_end_matches('>')
+                            .trim();
+                        let caption =
+                            (!label.is_empty()).then(|| RichBlockCaption::new(parse_inline(label)));
+
+                        match kind {
+                            "photo" => {
+                                return Some(RichBlock::Photo {
+                                    photo: json!({"type": "photo", "media": link}),
+                                    caption,
+                                });
+                            }
+                            "video" => {
+                                return Some(RichBlock::Video {
+                                    video: json!({"type": "video", "media": link}),
+                                    caption,
+                                });
+                            }
+                            "audio" => {
+                                return Some(RichBlock::Audio {
+                                    audio: json!({"type": "audio", "media": link}),
+                                    caption,
+                                });
+                            }
+                            "voice" => {
+                                return Some(RichBlock::VoiceNote {
+                                    voice_note: json!({"type": "voice", "media": link}),
+                                    caption,
+                                });
+                            }
+                            "animation" => {
+                                return Some(RichBlock::Animation {
+                                    animation: json!({"type": "animation", "media": link}),
+                                    caption,
+                                });
+                            }
+                            "document" => {
+                                return Some(RichBlock::Document {
+                                    document: json!({"type": "document", "media": link}),
+                                    caption,
+                                });
+                            }
+                            "collage" => {
+                                let urls: Vec<&str> = link
+                                    .split(',')
+                                    .map(str::trim)
+                                    .filter(|u| !u.is_empty())
+                                    .collect();
+                                let blocks: Vec<Value> = urls
+                                    .into_iter()
+                                    .map(|u| json!({"type": "photo", "photo": {"type": "photo", "media": u}}))
+                                    .collect();
+                                return Some(RichBlock::Collage { blocks, caption });
+                            }
+                            "slideshow" => {
+                                let urls: Vec<&str> = link
+                                    .split(',')
+                                    .map(str::trim)
+                                    .filter(|u| !u.is_empty())
+                                    .collect();
+                                let blocks: Vec<Value> = urls
+                                    .into_iter()
+                                    .map(|u| json!({"type": "photo", "photo": {"type": "photo", "media": u}}))
+                                    .collect();
+                                return Some(RichBlock::Slideshow { blocks, caption });
+                            }
+                            "map" => {
+                                let coords_str = if link.starts_with("http") {
+                                    link.split("?q=").nth(1).unwrap_or(link)
+                                } else {
+                                    link
+                                };
+                                if let Some((lat, lon, zoom)) = parse_coords_pair(coords_str) {
+                                    return Some(RichBlock::Map {
+                                        location: Location {
+                                            latitude: lat,
+                                            longitude: lon,
+                                            horizontal_accuracy: None,
+                                        },
+                                        zoom,
+                                        width: None,
+                                        height: None,
+                                    });
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
             }
         }
     }
 
-    if let Some(rest) = s
-        .strip_prefix("[collage:")
-        .or_else(|| s.strip_prefix("[gallery:"))
-        .or_else(|| s.strip_prefix("![collage:"))
-        .or_else(|| s.strip_prefix("![gallery:"))
-    {
-        if let Some((cap, urls_str)) = split_bracket_and_parenthesis(rest) {
-            let urls: Vec<&str> = urls_str
-                .split(',')
-                .map(str::trim)
-                .filter(|u| !u.is_empty())
-                .collect();
-            let blocks: Vec<Value> = urls
-                .into_iter()
-                .map(|u| json!({"type": "photo", "photo": {"type": "photo", "media": u}}))
-                .collect();
-            let caption = (!cap.is_empty()).then(|| RichBlockCaption::new(parse_inline(cap)));
-            return Some(RichBlock::Collage { blocks, caption });
-        }
-    }
-
-    if let Some(rest) = s
-        .strip_prefix("[slideshow:")
-        .or_else(|| s.strip_prefix("![slideshow:"))
-    {
-        if let Some((cap, urls_str)) = split_bracket_and_parenthesis(rest) {
-            let urls: Vec<&str> = urls_str
-                .split(',')
-                .map(str::trim)
-                .filter(|u| !u.is_empty())
-                .collect();
-            let blocks: Vec<Value> = urls
-                .into_iter()
-                .map(|u| json!({"type": "photo", "photo": {"type": "photo", "media": u}}))
-                .collect();
-            let caption = (!cap.is_empty()).then(|| RichBlockCaption::new(parse_inline(cap)));
-            return Some(RichBlock::Slideshow { blocks, caption });
-        }
-    }
-
-    if let Some(rest) = s.strip_prefix("![") {
-        if !s.starts_with("![map]") && !s.starts_with("![location]") {
+    // 2. Plain Markdown image syntax ![alt](url)
+    if let Some(rest) = s_clean.strip_prefix("![") {
+        let lower = s_clean.to_lowercase();
+        if !lower.starts_with("![map")
+            && !lower.starts_with("![location")
+            && !lower.starts_with("![lokasi")
+            && !lower.starts_with("![peta")
+        {
             if let Some((alt, link)) = split_bracket_and_parenthesis(rest) {
                 if link.starts_with("http://")
                     || link.starts_with("https://")
                     || link.starts_with("tg://")
                 {
-                    let lower_link = link.to_lowercase();
+                    let clean_url = link.split('?').next().unwrap_or(link);
+                    let lower_link = clean_url.to_lowercase();
                     let caption =
                         (!alt.is_empty()).then(|| RichBlockCaption::new(parse_inline(alt)));
                     if lower_link.ends_with(".mp4")
@@ -495,6 +777,126 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
     None
 }
 
+pub fn isolate_embedded_media_blocks(text: &str) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::with_capacity(text.len() + 64);
+    let mut in_code_block = false;
+
+    let media_regex = Regex::new(
+        r#"(?i)(!?\[(?:photo|foto|image|img|gambar|picture|pic|video|vid|audio|musik|music|lagu|song|voice|voicenote|voice_note|suara|rekaman|vn|animation|animasi|gif|collage|kolase|gallery|galeri|album|slideshow|slide|document|dokumen|doc|file|berkas|map|location|lokasi|peta|geo)\s*:[^\]]+\](?:\s*\([^\)]+\))?[.,;:]?|!\[[^\]]*\]\s*\([^\)]+\)[.,;:]?|<tg-(?:document|map)[^>]*/>)"#
+    ).ok();
+
+    for line in text.split('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(line);
+            continue;
+        }
+
+        if in_code_block || trimmed.is_empty() || media_regex.is_none() {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(line);
+            continue;
+        }
+
+        let regex = media_regex.as_ref().unwrap();
+        if !regex.is_match(line) {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(line);
+            continue;
+        }
+
+        // Split line around matches, putting each media block on its own line
+        let mut last_end = 0;
+        for mat in regex.find_iter(line) {
+            let start = mat.start();
+            let end = mat.end();
+
+            let before = line[last_end..start].trim();
+            if !before.is_empty() {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(before);
+            }
+
+            let matched_tag = line[start..end].trim();
+            if !matched_tag.is_empty() {
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(matched_tag);
+            }
+
+            last_end = end;
+        }
+
+        let after = line[last_end..].trim();
+        if !after.is_empty() {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(after);
+        }
+    }
+
+    output
+}
+
+fn sanitize_leaked_llm_artifacts(text: &str) -> String {
+    // 1. Strip closed thinking / reflection blocks
+    let step1 = Regex::new(r"(?is)<think>.*?</think>")
+        .map(|r| r.replace_all(text, "").into_owned())
+        .unwrap_or_else(|_| text.to_string());
+    let step2 = Regex::new(r"(?is)<thought>.*?</thought>")
+        .map(|r| r.replace_all(&step1, "").into_owned())
+        .unwrap_or(step1);
+    let step3 = Regex::new(r"(?is)<reasoning>.*?</reasoning>")
+        .map(|r| r.replace_all(&step2, "").into_owned())
+        .unwrap_or(step2);
+    let step4 = Regex::new(r"(?is)<reflection>.*?</reflection>")
+        .map(|r| r.replace_all(&step3, "").into_owned())
+        .unwrap_or(step3);
+    let step5 = Regex::new(r"(?is)<tool_call>.*?</tool_call>")
+        .map(|r| r.replace_all(&step4, "").into_owned())
+        .unwrap_or(step4);
+    let step6 = Regex::new(r"(?is)<function_calls?>.*?</function_calls?>")
+        .map(|r| r.replace_all(&step5, "").into_owned())
+        .unwrap_or(step5);
+
+    // 2. Unclosed <think>, <thought>, <reasoning>
+    let mut cleaned = step6;
+    for open_tag in ["<think>", "<thought>", "<reasoning>", "<reflection>"] {
+        if let Some(pos) = cleaned.to_lowercase().find(open_tag) {
+            cleaned = cleaned[..pos].trim().to_string();
+        }
+    }
+
+    // 3. Leaked tags or tokens
+    if let Ok(re) =
+        Regex::new(r"(?i)</?(?:think|thought|reasoning|reflection|tool_call|function_calls?)>")
+    {
+        cleaned = re.replace_all(&cleaned, "").into_owned();
+    }
+    cleaned = cleaned
+        .replace("<|im_start|>", "")
+        .replace("<|im_end|>", "")
+        .replace("<|endoftext|>", "");
+
+    cleaned
+}
+
 fn try_parse_table(
     lines: &[String],
     i: usize,
@@ -512,12 +914,15 @@ fn try_parse_table(
             .collect();
 
         let is_sep = !sep_cells.is_empty()
+            && sep_cells.iter().any(|c| {
+                !c.is_empty() && c.trim_matches(':').chars().all(|ch| ch == '-' || ch == '=')
+            })
             && sep_cells.iter().all(|c| {
                 if c.is_empty() {
                     return true;
                 }
                 let trimmed = c.trim_matches(':');
-                !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '-')
+                !trimmed.is_empty() && trimmed.chars().all(|ch| ch == '-' || ch == '=')
             });
 
         if is_sep {
@@ -532,10 +937,12 @@ fn try_parse_table(
                 }
             }
 
-            let header_raw: Vec<&str> = line
+            let unescaped_marker = "\u{E000}";
+            let safe_line = line.replace(r"\|", unescaped_marker);
+            let header_raw: Vec<String> = safe_line
                 .trim_matches('|')
                 .split('|')
-                .map(|c| c.trim())
+                .map(|c| c.trim().replace(unescaped_marker, "|"))
                 .collect();
 
             let header_row: Vec<RichBlockTableCell> = header_raw
@@ -543,7 +950,7 @@ fn try_parse_table(
                 .enumerate()
                 .map(|(idx, h)| {
                     let align = aligns.get(idx).copied().unwrap_or("left");
-                    RichBlockTableCell::new(parse_inline(h), true, Some(align))
+                    RichBlockTableCell::new(parse_inline(&h), true, Some(align))
                 })
                 .collect();
 
@@ -555,10 +962,11 @@ fn try_parse_table(
                 if row_str.is_empty() || !row_str.contains('|') {
                     break;
                 }
-                let row_raw: Vec<&str> = row_str
+                let safe_row = row_str.replace(r"\|", unescaped_marker);
+                let row_raw: Vec<String> = safe_row
                     .trim_matches('|')
                     .split('|')
-                    .map(|c| c.trim())
+                    .map(|c| c.trim().replace(unescaped_marker, "|"))
                     .collect();
 
                 let data_row: Vec<RichBlockTableCell> = row_raw
@@ -566,7 +974,7 @@ fn try_parse_table(
                     .enumerate()
                     .map(|(idx, c)| {
                         let align = aligns.get(idx).copied().unwrap_or("left");
-                        RichBlockTableCell::new(parse_inline(c), false, Some(align))
+                        RichBlockTableCell::new(parse_inline(&c), false, Some(align))
                     })
                     .collect();
 
@@ -947,21 +1355,13 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
         return Vec::new();
     }
 
-    // Strip <think>...</think>
-    let cleaned_step1 = Regex::new(r"(?s)<think>.*?</think>")
-        .map(|regex| regex.replace_all(text, "").into_owned())
-        .unwrap_or_else(|_| text.to_string());
-    let cleaned = Regex::new(r"(?i)</?think>")
-        .map(|regex| regex.replace_all(&cleaned_step1, "").into_owned())
-        .unwrap_or(cleaned_step1)
-        .trim()
-        .to_string();
-
-    if cleaned.is_empty() {
+    let sanitized = sanitize_leaked_llm_artifacts(text);
+    if sanitized.trim().is_empty() {
         return Vec::new();
     }
 
-    let lines: Vec<String> = cleaned
+    let isolated = isolate_embedded_media_blocks(&sanitized);
+    let lines: Vec<String> = isolated
         .replace("\r\n", "\n")
         .split('\n')
         .map(|s| s.to_string())
@@ -971,7 +1371,7 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
     let mut i = 0;
     let n = lines.len();
 
-    let heading_re = Regex::new(r"^(#{1,6})\s+(.+)$").ok();
+    let heading_re = Regex::new(r"^(#{1,6})\s*([^\s#].*)$").ok();
     let divider_re = Regex::new(r"^(\-{3,}|\*{3,}|_{3,}|─{3,}|—{2,})$").ok();
     let bullet_re = Regex::new(r"^[-*•]\s+").ok();
     let numbered_re = Regex::new(r"^\d+[\.)]\s+").ok();
@@ -1285,6 +1685,31 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
                 quote_lines.push(stripped_q.to_string());
                 i += 1;
             }
+            if let Some(first) = quote_lines.first_mut() {
+                let alerts = [
+                    ("[!NOTE]", "ℹ️ **Catatan:**"),
+                    ("[!note]", "ℹ️ **Catatan:**"),
+                    ("[!TIP]", "💡 **Tips:**"),
+                    ("[!tip]", "💡 **Tips:**"),
+                    ("[!IMPORTANT]", "📌 **Penting:**"),
+                    ("[!important]", "📌 **Penting:**"),
+                    ("[!WARNING]", "⚠️ **Peringatan:**"),
+                    ("[!warning]", "⚠️ **Peringatan:**"),
+                    ("[!CAUTION]", "🚨 **Perhatian:**"),
+                    ("[!caution]", "🚨 **Perhatian:**"),
+                ];
+                for (marker, replacement) in alerts {
+                    if first.starts_with(marker) {
+                        let rest = first[marker.len()..].trim();
+                        if rest.is_empty() {
+                            *first = replacement.to_string();
+                        } else {
+                            *first = format!("{replacement} {rest}");
+                        }
+                        break;
+                    }
+                }
+            }
             blocks.push(RichBlock::BlockQuotation {
                 blocks: vec![json!({
                     "type": "paragraph",
@@ -1426,12 +1851,11 @@ pub fn parse_markdown_to_rich_blocks(text: &str) -> Vec<RichBlock> {
                 || s_curr.starts_with(">>>")
                 || s_curr.starts_with("[table:")
                 || s_curr.starts_with("[caption:")
-                || s_curr.starts_with("[map:")
-                || s_curr.starts_with("![map]")
                 || s_curr.starts_with("<tg-map")
-                || s_curr.starts_with("[document:")
                 || s_curr.starts_with("<tg-document")
                 || try_parse_media_block(s_curr).is_some()
+                || try_parse_doc_block(s_curr).is_some()
+                || try_parse_map_block(s_curr).is_some()
                 || bullet_re
                     .as_ref()
                     .is_some_and(|regex| regex.is_match(s_curr))
@@ -1741,5 +2165,86 @@ Paragraf normal";
         assert!(serialized.contains(r#""type":"underline""#));
         assert!(serialized.contains("garis bawah"));
         assert!(serialized.contains("format ins"));
+    }
+
+    #[test]
+    fn indonesian_and_case_insensitive_media_tags_parse_correctly() {
+        let text = "[foto: Kucing Anggora](https://example.com/cat.jpg)\n\n[Foto : Kucing Lucu]  ( https://example.com/cat2.jpg ).\n\n[gambar: Pantai](https://example.com/beach.jpg)\n\n[dokumen: Laporan Keuangan](https://example.com/laporan.pdf)\n\n[file: Data Excel](https://example.com/data.xlsx)\n\n[musik: Suara Hujan](https://example.com/rain.mp3)\n\n[rekaman: Catatan Suara](https://example.com/voice.ogg)\n\n[lokasi: Monas, Jakarta](-6.175392, 106.827153)\n\n[kolase: Liburan](url1, url2)";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 9);
+        assert!(matches!(blocks[0], RichBlock::Photo { .. }));
+        assert!(matches!(blocks[1], RichBlock::Photo { .. }));
+        assert!(matches!(blocks[2], RichBlock::Photo { .. }));
+        assert!(matches!(blocks[3], RichBlock::Document { .. }));
+        assert!(matches!(blocks[4], RichBlock::Document { .. }));
+        assert!(matches!(blocks[5], RichBlock::Audio { .. }));
+        assert!(matches!(blocks[6], RichBlock::VoiceNote { .. }));
+        assert!(matches!(blocks[7], RichBlock::Map { .. }));
+        assert!(matches!(blocks[8], RichBlock::Collage { .. }));
+    }
+
+    #[test]
+    fn embedded_media_blocks_in_paragraphs_are_isolated_and_parsed() {
+        let text = "Ini fotonya: [photo: Kucing](https://example.com/cat.jpg) Kucing ini lucu.";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 3);
+        assert!(matches!(blocks[0], RichBlock::Paragraph { .. }));
+        assert!(matches!(blocks[1], RichBlock::Photo { .. }));
+        assert!(matches!(blocks[2], RichBlock::Paragraph { .. }));
+
+        let text_doc = "Silakan unduh dokumen [dokumen: Panduan](https://example.com/doc.pdf) yang telah kami siapkan.";
+        let blocks_doc = parse_markdown_to_rich_blocks(text_doc);
+        assert_eq!(blocks_doc.len(), 3);
+        assert!(matches!(blocks_doc[0], RichBlock::Paragraph { .. }));
+        assert!(matches!(blocks_doc[1], RichBlock::Document { .. }));
+        assert!(matches!(blocks_doc[2], RichBlock::Paragraph { .. }));
+    }
+
+    #[test]
+    fn html_tags_convert_to_rich_formatting() {
+        let input = "Teks <b>tebal</b> dan <strong>kuat</strong> serta <i>miring</i> dan <code>kode()</code> serta <a href=\"https://example.com\">Tautan</a>";
+        let value = parse_inline(input);
+        let serialized = serde_json::to_string(&value).unwrap();
+        assert!(serialized.contains(r#""type":"bold""#));
+        assert!(serialized.contains("tebal"));
+        assert!(serialized.contains("kuat"));
+        assert!(serialized.contains(r#""type":"italic""#));
+        assert!(serialized.contains("miring"));
+        assert!(serialized.contains(r#""type":"code""#));
+        assert!(serialized.contains("kode()"));
+        assert!(serialized.contains(r#""type":"url""#));
+        assert!(serialized.contains("https://example.com"));
+    }
+
+    #[test]
+    fn github_alert_callouts_parse_correctly() {
+        let text = "> [!NOTE]\n> Ini catatan penting sistem.";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        let serialized = serde_json::to_string(&blocks[0]).unwrap();
+        assert!(serialized.contains("Catatan:"));
+        assert!(serialized.contains("Ini catatan penting sistem."));
+    }
+
+    #[test]
+    fn headings_without_space_parse_correctly() {
+        let text = "###Fitur Baru\n\nPenjelasan fitur.";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 2);
+        assert!(matches!(
+            blocks[0],
+            RichBlock::SectionHeading { level: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn leaked_thinking_and_tool_calls_are_stripped() {
+        let text = "<think>\nInternal secret reasoning\n</think>\n<tool_call>\n{\"name\": \"search\"}\n</tool_call>\nHalo! Ada yang bisa dibantu?";
+        let blocks = parse_markdown_to_rich_blocks(text);
+        assert_eq!(blocks.len(), 1);
+        let serialized = serde_json::to_string(&blocks[0]).unwrap();
+        assert!(!serialized.contains("Internal secret reasoning"));
+        assert!(!serialized.contains("tool_call"));
+        assert!(serialized.contains("Halo! Ada yang bisa dibantu?"));
     }
 }

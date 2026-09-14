@@ -2128,8 +2128,8 @@ impl AIChatService {
                         Dokumen Xiao diekstrak menjadi teks bila memungkinkan; PDF scan dapat diberikan sebagai halaman hasil render untuk OCR visual. \
                         Lakukan penalaran secara internal dan berikan hanya jawaban yang berguna bagi pengguna; jangan menampilkan chain-of-thought tersembunyi. \
                         Gunakan gaya bahasa yang alami dan format teks yang elegan. \
-                        Jika membuat tabel atau data berkolom, gunakan Markdown Table standar agar Xiao dapat merendernya sebagai tabel Telegram. \
-                        Jika diminta menyajikan visual atau media publik yang relevan, kamu dapat menyisipkan format blok media berikut:\n\
+                        Jika membuat tabel atau data berkolom, gunakan Markdown Table standar agar Xiao dapat merendernya secara rapi. \
+                        Jika diminta menyajikan visual atau media publik yang relevan, letakkan format blok media pada baris tersendiri:\n\
                         - Foto: [photo: Judul](https://url-gambar) atau ![Judul](https://url-gambar)\n\
                         - Galeri/Kolase Foto: [collage: Judul](https://url-1, https://url-2)\n\
                         - Slide Foto: [slideshow: Judul](https://url-1, https://url-2)\n\
@@ -2137,7 +2137,8 @@ impl AIChatService {
                         - Rekaman Suara: [voice: Catatan Suara](https://url-audio)\n\
                         - Video: [video: Judul Video](https://url-video)\n\
                         - Peta/Lokasi: [map: latitude, longitude]\n\
-                        - Dokumen: [document: Nama Dokumen](https://url-dokumen)"
+                        - Dokumen: [document: Nama Dokumen](https://url-dokumen)\n\
+                        Jangan pernah menampilkan tag internal seperti <think>, <thought>, <tool_call>, atau blok JSON raw ke pengguna."
         })];
 
         messages.extend(history);

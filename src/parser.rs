@@ -3,7 +3,12 @@ use serde_json::Value;
 use crate::bot::models::{InputRichMessage, RichBlock};
 
 #[path = "parser/markdown.rs"]
-mod markdown;
+pub(crate) mod markdown;
+
+#[path = "parser/terminal.rs"]
+pub mod terminal;
+#[allow(unused_imports)]
+pub use terminal::render_terminal_markdown;
 
 #[allow(dead_code)]
 pub fn parse_inline(input_str: &str) -> Value {

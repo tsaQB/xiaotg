@@ -2904,11 +2904,22 @@ async fn execute_cli_chat_turn(
                     println!("\x1b[38;5;242m└────────────────────────────────────────────────\x1b[0m");
                 }
 
+                let rendered = crate::parser::render_terminal_markdown(&answer);
+                let rendered_trimmed = rendered.trim();
+
                 if interactive {
-                    println!("\x1b[1;38;5;81mXiao ▸\x1b[0m {}", answer.trim());
+                    if rendered_trimmed.contains('\n') || rendered_trimmed.contains("┌─") || rendered_trimmed.contains("▌") {
+                        println!("\x1b[1;38;5;81mXiao ▸\x1b[0m\n{}", rendered_trimmed);
+                    } else {
+                        println!("\x1b[1;38;5;81mXiao ▸\x1b[0m {}", rendered_trimmed);
+                    }
                     println!("\x1b[38;5;243m[{:.1}s • {}]\x1b[0m\n", elapsed, model_name);
                 } else {
-                    println!("\x1b[1;38;5;81mXiao ▸\x1b[0m {}", answer.trim());
+                    if rendered_trimmed.contains('\n') || rendered_trimmed.contains("┌─") || rendered_trimmed.contains("▌") {
+                        println!("\x1b[1;38;5;81mXiao ▸\x1b[0m\n{}", rendered_trimmed);
+                    } else {
+                        println!("\x1b[1;38;5;81mXiao ▸\x1b[0m {}", rendered_trimmed);
+                    }
                     println!("\x1b[38;5;243m[{:.1}s • {}]\x1b[0m", elapsed, model_name);
                 }
             } else {
