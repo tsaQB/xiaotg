@@ -39,6 +39,26 @@ impl Drop for CleanRawMode {
     }
 }
 
+#[inline]
+fn cycle_prev(pos: usize, len: usize) -> usize {
+    if len == 0 {
+        0
+    } else if pos == 0 || pos >= len {
+        len - 1
+    } else {
+        pos - 1
+    }
+}
+
+#[inline]
+fn cycle_next(pos: usize, len: usize) -> usize {
+    if len == 0 || pos + 1 >= len {
+        0
+    } else {
+        pos + 1
+    }
+}
+
 pub fn terminal_interactive_select(
     title: &str,
     items: &[String],
@@ -153,12 +173,8 @@ pub fn terminal_interactive_select(
                         return Some(orig_idx);
                     }
                 }
-                KeyCode::Up => selected_pos = selected_pos.saturating_sub(1),
-                KeyCode::Down => {
-                    if !filtered.is_empty() && selected_pos + 1 < filtered.len() {
-                        selected_pos += 1;
-                    }
-                }
+                KeyCode::Up => selected_pos = cycle_prev(selected_pos, filtered.len()),
+                KeyCode::Down => selected_pos = cycle_next(selected_pos, filtered.len()),
                 KeyCode::PageUp => selected_pos = selected_pos.saturating_sub(page_size),
                 KeyCode::PageDown => {
                     if !filtered.is_empty() {
@@ -280,10 +296,8 @@ pub fn terminal_interactive_multi_select(
             }
             match code {
                 KeyCode::Esc => return None,
-                KeyCode::Up => cursor_idx = cursor_idx.saturating_sub(1),
-                KeyCode::Down => {
-                    cursor_idx = (cursor_idx + 1).min(filtered.len().saturating_sub(1))
-                }
+                KeyCode::Up => cursor_idx = cycle_prev(cursor_idx, filtered.len()),
+                KeyCode::Down => cursor_idx = cycle_next(cursor_idx, filtered.len()),
                 KeyCode::PageUp => cursor_idx = cursor_idx.saturating_sub(page_size),
                 KeyCode::PageDown => {
                     cursor_idx = (cursor_idx + page_size).min(filtered.len().saturating_sub(1))
@@ -2569,5 +2583,23 @@ mod tests {
     #[test]
     fn print_cli_help_executes() {
         print_cli_help();
+    }
+
+    #[test]
+    fn test_interactive_cursor_wrap_around() {
+        assert_eq!(cycle_prev(0, 5), 4);
+        assert_eq!(cycle_prev(1, 5), 0);
+        assert_eq!(cycle_prev(4, 5), 3);
+        assert_eq!(cycle_next(0, 5), 1);
+        assert_eq!(cycle_next(3, 5), 4);
+        assert_eq!(cycle_next(4, 5), 0);
+
+        // Edge cases
+        assert_eq!(cycle_prev(0, 0), 0);
+        assert_eq!(cycle_next(0, 0), 0);
+        assert_eq!(cycle_prev(0, 1), 0);
+        assert_eq!(cycle_next(0, 1), 0);
+        assert_eq!(cycle_prev(10, 5), 4);
+        assert_eq!(cycle_next(10, 5), 0);
     }
 }
