@@ -856,6 +856,42 @@ async fn run_cli_gateway_telegram_submenu() {
     }
 }
 
+pub(crate) async fn run_cli_gateway_hub(action: Option<&str>, target: Option<&str>) {
+    load_environment();
+    match action {
+        None => {
+            run_cli_gateway_menu().await;
+        }
+        Some("check") | Some("test") | Some("status") => {
+            run_cli_telegram_check().await;
+        }
+        Some("token") | Some("bind") => {
+            run_cli_telegram_bind(target).await;
+        }
+        Some("owner") => {
+            run_cli_telegram_owner(target).await;
+        }
+        Some("help") | Some("--help") | Some("-h") => {
+            println!("\n\x1b[1;36mxiao gateway — Telegram Messaging Gateway Management\x1b[0m\n");
+            println!("\x1b[1;37mUsage:\x1b[0m");
+            println!("  xiao gateway [action] [target]\n");
+            println!("\x1b[1;37mSubcommands for 'gateway':\x1b[0m");
+            println!(
+                "  \x1b[36mxiao gateway\x1b[0m                Open Interactive Gateway Manager"
+            );
+            println!("  \x1b[36mxiao gateway check\x1b[0m          Verify bot token connectivity (getMe)");
+            println!(
+                "  \x1b[36mxiao gateway token <TOKEN>\x1b[0m  Bind and verify Telegram Bot Token"
+            );
+            println!("  \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID\n");
+        }
+        Some(unknown) => {
+            println!("\x1b[31m✖ Error: Sub-perintah 'gateway {unknown}' tidak dikenal.\x1b[0m");
+            println!("  Jalankan 'xiao gateway help' atau 'xiao help' untuk bantuan.\n");
+        }
+    }
+}
+
 pub(crate) async fn run_cli_telegram_check() {
     load_environment();
     println!("\n\x1b[1;36mTelegram Gateway Status\x1b[0m");
@@ -2401,6 +2437,224 @@ pub(crate) async fn run_cli_ai_hub(
     }
 }
 
+pub(crate) fn print_cli_complete_models() {
+    load_environment();
+    let store = load_provider_store();
+    let mut seen = std::collections::HashSet::new();
+    for prov in &store.providers {
+        for m in &prov.models {
+            if seen.insert(m.clone()) {
+                println!("{m}");
+            }
+            let prov_model_id = format!("{}/{}", prov.id, m);
+            if seen.insert(prov_model_id.clone()) {
+                println!("{prov_model_id}");
+            }
+            if !prov.name.eq_ignore_ascii_case(&prov.id) {
+                let prov_model_name = format!("{}/{}", prov.name, m);
+                if seen.insert(prov_model_name.clone()) {
+                    println!("{prov_model_name}");
+                }
+            }
+        }
+        if !prov.active_model.trim().is_empty() {
+            if seen.insert(prov.active_model.clone()) {
+                println!("{}", prov.active_model);
+            }
+            let prov_model_id = format!("{}/{}", prov.id, prov.active_model);
+            if seen.insert(prov_model_id.clone()) {
+                println!("{prov_model_id}");
+            }
+        }
+    }
+}
+
+pub(crate) fn print_cli_complete_providers() {
+    load_environment();
+    let store = load_provider_store();
+    let mut seen = std::collections::HashSet::new();
+    for prov in &store.providers {
+        if seen.insert(prov.id.clone()) {
+            println!("{}", prov.id);
+        }
+        if !prov.name.eq_ignore_ascii_case(&prov.id) && seen.insert(prov.name.clone()) {
+            println!("{}", prov.name);
+        }
+    }
+}
+
+pub(crate) fn generate_bash_completion() -> &'static str {
+    r#"_xiao_completion() {
+    local cur prev words cword
+    if declare -F _init_completion >/dev/null 2>&1; then
+        _init_completion || return
+    else
+        COMPREPLY=()
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        words=("${COMP_WORDS[@]}")
+        cword=$COMP_CWORD
+    fi
+
+    local commands="start setup status ai gateway completion version help"
+    local ai_actions="use list add rm addon test help"
+    local ai_test_roles="vision video stt audio image img all"
+    local gateway_actions="check test token owner help"
+
+    if [[ $cword -eq 1 ]]; then
+        COMPREPLY=( $(compgen -W "$commands -v --version -h --help" -- "$cur") )
+        return 0
+    fi
+
+    local subcmd="${words[1]}"
+
+    case "$subcmd" in
+        ai)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$ai_actions" -- "$cur") )
+                return 0
+            fi
+
+            local ai_sub="${words[2]}"
+            case "$ai_sub" in
+                use)
+                    if [[ $cword -eq 3 ]]; then
+                        local models
+                        models=$(xiao __complete_models 2>/dev/null)
+                        COMPREPLY=( $(compgen -W "$models" -- "$cur") )
+                        return 0
+                    fi
+                    ;;
+                test|probe)
+                    if [[ $cword -eq 3 ]]; then
+                        COMPREPLY=( $(compgen -W "$ai_test_roles" -- "$cur") )
+                        return 0
+                    fi
+                    ;;
+                rm|remove)
+                    if [[ $cword -eq 3 ]]; then
+                        local providers
+                        providers=$(xiao __complete_providers 2>/dev/null)
+                        COMPREPLY=( $(compgen -W "$providers" -- "$cur") )
+                        return 0
+                    fi
+                    ;;
+            esac
+            ;;
+        gateway)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "$gateway_actions" -- "$cur") )
+                return 0
+            fi
+            ;;
+        completion)
+            if [[ $cword -eq 2 ]]; then
+                COMPREPLY=( $(compgen -W "bash zsh" -- "$cur") )
+                return 0
+            fi
+            ;;
+    esac
+}
+
+complete -F _xiao_completion xiao
+"#
+}
+
+pub(crate) fn generate_zsh_completion() -> &'static str {
+    r#"#compdef xiao
+
+_xiao() {
+    local -a commands
+    commands=(
+        'start:Run bot daemon (default)'
+        'setup:Interactive initial setup wizard'
+        'status:Display system status dashboard'
+        'ai:Unified AI management hub'
+        'gateway:Manage Telegram messaging gateway'
+        'completion:Generate shell completion script'
+        'version:Display binary version'
+        'help:Show help message'
+    )
+
+    if (( CURRENT == 2 )); then
+        _describe 'command' commands
+        return
+    fi
+
+    case "$words[2]" in
+        ai)
+            if (( CURRENT == 3 )); then
+                local -a ai_actions
+                ai_actions=(
+                    'use:Switch Main Model directly'
+                    'list:Print registered providers and models'
+                    'add:Add a new AI provider'
+                    'rm:Remove an existing provider'
+                    'addon:Configure multimodal specialist routes'
+                    'test:Run diagnostic probe center'
+                    'help:Show ai help message'
+                )
+                _describe 'ai action' ai_actions
+            elif (( CURRENT == 4 )); then
+                case "$words[3]" in
+                    use)
+                        local -a models
+                        models=(${(f)"$(xiao __complete_models 2>/dev/null)"})
+                        _describe 'model' models
+                        ;;
+                    test|probe)
+                        local -a roles
+                        roles=(
+                            'vision:Test Vision specialist'
+                            'video:Test Video specialist'
+                            'stt:Test Audio STT specialist'
+                            'image:Test Image Generation specialist'
+                            'all:Audit and refresh all active models'
+                        )
+                        _describe 'test role' roles
+                        ;;
+                    rm|remove)
+                        local -a providers
+                        providers=(${(f)"$(xiao __complete_providers 2>/dev/null)"})
+                        _describe 'provider' providers
+                        ;;
+                esac
+            fi
+            ;;
+        gateway)
+            if (( CURRENT == 3 )); then
+                local -a gw_actions
+                gw_actions=(
+                    'check:Verify bot token connectivity'
+                    'token:Bind and verify Telegram Bot Token'
+                    'owner:Set Telegram Owner User ID'
+                    'help:Show gateway help message'
+                )
+                _describe 'gateway action' gw_actions
+            fi
+            ;;
+        completion)
+            if (( CURRENT == 3 )); then
+                local -a shells
+                shells=('bash:Bash completion script' 'zsh:Zsh completion script')
+                _describe 'shell' shells
+            fi
+            ;;
+    esac
+}
+
+compdef _xiao xiao 2>/dev/null || true
+_xiao "$@"
+"#
+}
+
+pub(crate) fn print_cli_completion(shell: &str) {
+    match shell.trim().to_ascii_lowercase().as_str() {
+        "zsh" => print!("{}", generate_zsh_completion()),
+        _ => print!("{}", generate_bash_completion()),
+    }
+}
+
 pub(crate) fn print_cli_help() {
     println!(
         "\n\x1b[1;36mxiao v{} — AI Assistant Bot\x1b[0m\n",
@@ -2415,7 +2669,8 @@ pub(crate) fn print_cli_help() {
     );
     println!("  \x1b[36mstatus\x1b[0m              Display system, database, and provider status dashboard");
     println!("  \x1b[36mai [action]\x1b[0m         Unified AI management hub (Model, Provider, Addon) [Interactive/One-Liner]");
-    println!("  \x1b[36mgateway\x1b[0m             Manage Telegram messaging gateway (Token & Owner ID) [Interactive]");
+    println!("  \x1b[36mgateway [action]\x1b[0m    Manage Telegram messaging gateway (Token & Owner ID) [Interactive/One-Liner]");
+    println!("  \x1b[36mcompletion [shell]\x1b[0m  Generate shell completion script (bash or zsh)");
     println!("  \x1b[36mversion, -v\x1b[0m         Display binary version");
     println!("  \x1b[36mhelp\x1b[0m                Show this help message\n");
     println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
@@ -2426,6 +2681,11 @@ pub(crate) fn print_cli_help() {
     println!("  \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
     println!("  \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
     println!("  \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
+    println!("\x1b[1;37mSubcommands for 'gateway':\x1b[0m");
+    println!("  \x1b[36mxiao gateway\x1b[0m                Open Interactive Gateway Manager");
+    println!("  \x1b[36mxiao gateway check\x1b[0m          Verify bot token connectivity (getMe)");
+    println!("  \x1b[36mxiao gateway token <TOKEN>\x1b[0m  Bind and verify Telegram Bot Token");
+    println!("  \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID\n");
 }
 
 #[cfg(test)]
@@ -2519,5 +2779,23 @@ mod tests {
     #[test]
     fn print_cli_help_executes() {
         print_cli_help();
+    }
+
+    #[test]
+    fn bash_completion_contains_commands() {
+        let bash = generate_bash_completion();
+        assert!(bash.contains("ai"));
+        assert!(bash.contains("gateway"));
+        assert!(bash.contains("use"));
+        assert!(bash.contains("__complete_models"));
+    }
+
+    #[test]
+    fn zsh_completion_contains_commands() {
+        let zsh = generate_zsh_completion();
+        assert!(zsh.contains("ai"));
+        assert!(zsh.contains("gateway"));
+        assert!(zsh.contains("use"));
+        assert!(zsh.contains("__complete_models"));
     }
 }
