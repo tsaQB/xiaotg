@@ -3007,6 +3007,35 @@ impl AIChatService {
         }
     }
 
+    async fn request_completion_text(
+        &self,
+        provider: &ProviderConfig,
+        payload: &Value,
+    ) -> Option<String> {
+        let url = provider_url(&provider.endpoint, "chat/completions");
+        let mut req = self.client.post(&url).json(payload);
+        if !provider.api_key.is_empty()
+            && !["none", "-", "no"]
+                .iter()
+                .any(|k| provider.api_key.eq_ignore_ascii_case(k))
+        {
+            req = req.bearer_auth(&provider.api_key);
+        }
+
+        let resp = req.timeout(Duration::from_secs(30)).send().await.ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+
+        let body = resp.json::<Value>().await.ok()?;
+        body.get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .map(|s| s.trim().to_string())
+    }
+
     async fn extract_user_facts_background(
         &self,
         user_id: i64,
@@ -3025,7 +3054,6 @@ impl AIChatService {
             existing_context.push('\n');
         }
 
-        let url = provider_url(&provider.endpoint, "chat/completions");
         let extract_prompt = format!(
             "{}Recent conversation:\nUser input: \"{}\"\nAssistant reply: \"{}\"\n\n\
             Analyze the interaction and extract or update persistent personal profile facts about the user \
@@ -3057,41 +3085,29 @@ impl AIChatService {
             "stream": false
         });
 
-        let mut req = self.client.post(&url).json(&payload);
-        if !provider.api_key.is_empty()
-            && !["none", "-", "no"]
-                .iter()
-                .any(|k| provider.api_key.eq_ignore_ascii_case(k))
-        {
-            req = req.bearer_auth(&provider.api_key);
-        }
-
-        let resp = match req.timeout(Duration::from_secs(30)).send().await {
-            Ok(r) if r.status().is_success() => r,
-            _ => return,
+        let content = match self.request_completion_text(provider, &payload).await {
+            Some(c) => c,
+            None => return,
         };
-
-        let body = match resp.json::<Value>().await {
-            Ok(v) => v,
-            Err(_) => return,
-        };
-
-        let content = body
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim();
 
         let clean_json = if let Some(stripped) = content.strip_prefix("```json") {
             stripped.trim_end_matches("```").trim()
         } else if let Some(stripped) = content.strip_prefix("```") {
             stripped.trim_end_matches("```").trim()
         } else {
-            content
+            content.as_str()
         };
+
+        let json_str =
+            if let (Some(start), Some(end)) = (clean_json.find('['), clean_json.rfind(']')) {
+                if start < end {
+                    &clean_json[start..=end]
+                } else {
+                    clean_json
+                }
+            } else {
+                clean_json
+            };
 
         #[derive(Deserialize)]
         struct ExtractedFact {
@@ -3099,7 +3115,7 @@ impl AIChatService {
             fact: String,
         }
 
-        if let Ok(facts) = serde_json::from_str::<Vec<ExtractedFact>>(clean_json) {
+        if let Ok(facts) = serde_json::from_str::<Vec<ExtractedFact>>(json_str) {
             for f in facts {
                 let k = f.key.trim().to_string();
                 let v = f.fact.trim().to_string();
@@ -3139,7 +3155,6 @@ impl AIChatService {
         }
         context_text.push_str(&format!("Recent conversation turns:\n{turns_text}\n\n"));
 
-        let url = provider_url(&provider.endpoint, "chat/completions");
         let summary_prompt = format!(
             "{}Update and condense the ongoing context, key discussions, and decisions in 2-3 concise sentences. Output only the plain summary.",
             truncate_chars(&context_text, 3500)
@@ -3154,37 +3169,14 @@ impl AIChatService {
             "max_tokens": 250,
             "stream": false
         });
-        let mut req = self.client.post(&url).json(&payload);
-        if !provider.api_key.is_empty()
-            && !["none", "-", "no"]
-                .iter()
-                .any(|k| provider.api_key.eq_ignore_ascii_case(k))
-        {
-            req = req.bearer_auth(&provider.api_key);
-        }
-        if let Ok(resp) = req.timeout(Duration::from_secs(30)).send().await {
-            if let Ok(body) = resp.json::<Value>().await {
-                if let Some(summary) = body
-                    .get("choices")
-                    .and_then(|c| c.get(0))
-                    .and_then(|c| c.get("message"))
-                    .and_then(|m| m.get("content"))
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    save_scoped_summary_async(chat_id, thread_id, summary.to_string()).await;
 
-                    // Also extract any lingering user profile facts from older turns into Tier 1
-                    self.extract_user_facts_background(
-                        user_id,
-                        provider,
-                        model,
-                        &turns_text,
-                        summary,
-                    )
+        if let Some(summary) = self.request_completion_text(provider, &payload).await {
+            if !summary.is_empty() {
+                save_scoped_summary_async(chat_id, thread_id, summary.clone()).await;
+
+                // Also extract any lingering user profile facts from older turns into Tier 1
+                self.extract_user_facts_background(user_id, provider, model, &turns_text, &summary)
                     .await;
-                }
             }
         }
     }

@@ -417,6 +417,24 @@ pub(super) async fn persist_provider_state(store: ProviderStore) -> bool {
     }
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TopicScope {
+    pub chat_id: i64,
+    pub thread_id: i64,
+}
+
+#[allow(dead_code)]
+impl TopicScope {
+    pub fn new(chat_id: i64, thread_id: i64) -> Self {
+        Self { chat_id, thread_id }
+    }
+
+    pub fn is_private(&self) -> bool {
+        self.thread_id == 0 && self.chat_id > 0
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
@@ -2984,5 +3002,18 @@ mod tests {
             get_scoped_summary_on_conn(&conn, 100, 0).unwrap(),
             Some("Updated summary".to_string())
         );
+    }
+
+    #[test]
+    fn test_topic_scope_helpers() {
+        let private_scope = TopicScope::new(12345, 0);
+        assert!(private_scope.is_private());
+        assert_eq!(private_scope.chat_id, 12345);
+        assert_eq!(private_scope.thread_id, 0);
+
+        let group_topic_scope = TopicScope::new(-1001234567, 99);
+        assert!(!group_topic_scope.is_private());
+        assert_eq!(group_topic_scope.chat_id, -1001234567);
+        assert_eq!(group_topic_scope.thread_id, 99);
     }
 }
