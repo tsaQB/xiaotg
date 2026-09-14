@@ -189,11 +189,12 @@ cargo run -- help                # Print CLI subcommand reference
 - Many local model servers (e.g., Ollama, vLLM, text-generation-webui) reject requests containing the `tools` parameter with `HTTP 400 Bad Request`.
 - The chat service intercepts HTTP 400 errors during tool-enabled chat and automatically retries the request without `tools`. When modifying provider calling code, never remove this fallback path.
 
-### 7. 5-Role Multimodal Model Routing Rules
-- The 5 roles are `Main`, `Vision`, `Video`, `AudioStt`, and `ImageGeneration`.
+### 7. 6-Role Multimodal & Evaluator Model Routing Rules
+- The 6 roles are `Main`, `Vision`, `Video`, `AudioStt`, `ImageGeneration`, and `Curator` (Memory Curator / Background Judge).
 - Model configuration is managed purely through the CLI (`xiao ai` / `xiao model` for the Main Model and `xiao ai addon` / `xiao addon` for specialist roles). The Telegram interface remains a focused chat gateway without in-app `/model` command widgets.
 - An addon route configured as `MainModel` dynamically tracks changes to the Main Model. An addon configured as `Specific` or `Disabled` is never overwritten when the Main Model changes.
 - Specialist invocations send only the immediate user input and relevant media to the specialist model; they do not send canonical session history to the specialist. Canonical history is maintained solely with the Main Model.
+- The `Curator` role runs asynchronously in the background after turns to extract/reconcile Tier 1 persistent user facts (`user_memories`) and generate Tier 2 conversation summaries (`scoped_summaries`), offloading structured reflective evaluation from the Main Model. If set to `Disabled`, background evaluation cleanly exits with zero network calls.
 
 ### 8. Enhanced Markdown AST & Bot API 10.1 - 10.3 Rich Entities
 - Markdown links support Telegram in-app deep links via `tg://` (such as `tg://document?id=...`) and document blocks via `[document: ...]` or `<tg-document ...>`.

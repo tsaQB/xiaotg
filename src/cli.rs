@@ -1668,6 +1668,7 @@ fn addon_role_short_label(role: ModelRole) -> &'static str {
         ModelRole::Video => "Video",
         ModelRole::AudioStt => "Audio STT",
         ModelRole::ImageGeneration => "Image Gen",
+        ModelRole::Curator => "Curator",
         ModelRole::Main => "Main",
     }
 }
@@ -1920,6 +1921,7 @@ pub(crate) async fn run_cli_probe_menu(ai_service: &AIChatService) {
             "Uji Spesialis Video (Live Test)".to_string(),
             "Uji Spesialis Audio STT (Live Test)".to_string(),
             "Uji Spesialis Image Gen (Live Test Gambar)".to_string(),
+            "Uji Spesialis Memory Curator (Live Test)".to_string(),
             "Lihat Cache Kapabilitas SQLite".to_string(),
             "Selesai / Keluar".to_string(),
         ];
@@ -1958,6 +1960,10 @@ pub(crate) async fn run_cli_probe_menu(ai_service: &AIChatService) {
                 print_press_enter();
             }
             5 => {
+                run_cli_probe_test_role(ai_service, ModelRole::Curator).await;
+                print_press_enter();
+            }
+            6 => {
                 run_cli_probe_show_registry().await;
                 print_press_enter();
             }
@@ -2378,6 +2384,7 @@ pub(crate) async fn run_cli_ai_hub(
                     ModelRole::Video => "Video",
                     ModelRole::AudioStt => "Audio STT",
                     ModelRole::ImageGeneration => "Image Gen",
+                    ModelRole::Curator => "Curator",
                     _ => role.display_name(),
                 };
                 addon_lines.push(format!("     {:<9}: {}", label, route_desc));
@@ -2602,6 +2609,10 @@ pub(crate) async fn run_cli_ai_hub(
                 run_cli_probe_test_image_gen(ai_service).await;
                 print_press_enter();
             }
+            Some("curator") | Some("judge") => {
+                run_cli_probe_test_role(ai_service, ModelRole::Curator).await;
+                print_press_enter();
+            }
             _ => {
                 run_cli_probe_menu(ai_service).await;
             }
@@ -2617,8 +2628,8 @@ pub(crate) async fn run_cli_ai_hub(
                 "     \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models"
             );
             println!("     \x1b[36mxiao ai [add|rm]\x1b[0m    Add or remove an OpenAI-compatible AI provider");
-            println!("     \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
-            println!("     \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
+            println!("     \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image, Curator)");
+            println!("     \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, curator, all)\n");
         }
         Some(unknown) => {
             println!("\x1b[31m✖ Error: Sub-perintah 'ai {unknown}' tidak dikenal.\x1b[0m");

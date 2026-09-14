@@ -8,6 +8,7 @@ pub enum ModelRole {
     Video,
     AudioStt,
     ImageGeneration,
+    Curator,
 }
 
 impl ModelRole {
@@ -21,6 +22,7 @@ impl ModelRole {
             "image_gen" | "image-gen" | "image_generation" | "image-generation" | "image" => {
                 Some(Self::ImageGeneration)
             }
+            "curator" | "judge" | "memory_curator" | "memory-curator" => Some(Self::Curator),
             _ => None,
         }
     }
@@ -32,15 +34,17 @@ impl ModelRole {
             Self::Video => "Video Model",
             Self::AudioStt => "Audio STT Model",
             Self::ImageGeneration => "Image Generation Model",
+            Self::Curator => "Memory Curator",
         }
     }
 
-    pub fn addon_roles() -> [Self; 4] {
+    pub fn addon_roles() -> [Self; 5] {
         [
             Self::Vision,
             Self::Video,
             Self::AudioStt,
             Self::ImageGeneration,
+            Self::Curator,
         ]
     }
 }
@@ -99,6 +103,8 @@ pub struct ModelRoutingConfig {
     pub audio_stt: ModelRoute,
     #[serde(default)]
     pub image_gen: ModelRoute,
+    #[serde(default)]
+    pub curator: ModelRoute,
 }
 
 impl Default for ModelRoutingConfig {
@@ -109,6 +115,7 @@ impl Default for ModelRoutingConfig {
             video: ModelRoute::MainModel,
             audio_stt: ModelRoute::MainModel,
             image_gen: ModelRoute::MainModel,
+            curator: ModelRoute::MainModel,
         }
     }
 }
@@ -121,6 +128,7 @@ impl ModelRoutingConfig {
             ModelRole::Video => Some(&self.video),
             ModelRole::AudioStt => Some(&self.audio_stt),
             ModelRole::ImageGeneration => Some(&self.image_gen),
+            ModelRole::Curator => Some(&self.curator),
         }
     }
 
@@ -143,6 +151,10 @@ impl ModelRoutingConfig {
             }
             ModelRole::ImageGeneration => {
                 self.image_gen = route;
+                Ok(())
+            }
+            ModelRole::Curator => {
+                self.curator = route;
                 Ok(())
             }
         }
@@ -210,5 +222,39 @@ mod tests {
             .set_route(ModelRole::Video, ModelRoute::Disabled)
             .unwrap();
         assert_eq!(config.route(ModelRole::Video), Some(&ModelRoute::Disabled));
+    }
+
+    #[test]
+    fn curator_role_parses_and_routes() {
+        assert_eq!(ModelRole::parse("curator"), Some(ModelRole::Curator));
+        assert_eq!(ModelRole::parse("judge"), Some(ModelRole::Curator));
+        assert_eq!(ModelRole::parse("memory_curator"), Some(ModelRole::Curator));
+        assert_eq!(ModelRole::Curator.display_name(), "Memory Curator");
+
+        let mut config = ModelRoutingConfig::default();
+        assert_eq!(
+            config.route(ModelRole::Curator),
+            Some(&ModelRoute::MainModel)
+        );
+        config
+            .set_route(
+                ModelRole::Curator,
+                ModelRoute::Specific {
+                    provider_id: "groq".into(),
+                    model: "llama-3.1-8b-instant".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            config.route(ModelRole::Curator),
+            Some(&ModelRoute::Specific {
+                provider_id: "groq".into(),
+                model: "llama-3.1-8b-instant".into(),
+            })
+        );
+        assert_eq!(
+            config.roles_using_provider("groq"),
+            vec![ModelRole::Curator]
+        );
     }
 }

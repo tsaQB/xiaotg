@@ -2880,6 +2880,10 @@ mod tests {
             config.route(crate::ai::routing::ModelRole::AudioStt),
             Some(&crate::ai::routing::ModelRoute::MainModel)
         );
+        assert_eq!(
+            config.route(crate::ai::routing::ModelRole::Curator),
+            Some(&crate::ai::routing::ModelRoute::MainModel)
+        );
     }
 
     #[test]

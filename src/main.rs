@@ -341,6 +341,7 @@ fn specialist_context_policy(
         }
         ai::service::ModelRole::AudioStt => "Transcript only; no full history",
         ai::service::ModelRole::ImageGeneration => "Prompt/config only; no canonical history",
+        ai::service::ModelRole::Curator => "Background extraction & summarization only",
         ai::service::ModelRole::Main => "Canonical Main context",
     }
 }
@@ -2291,6 +2292,11 @@ mod update_lane_tests {
             ai::service::RouteOrigin::Specific
         )
         .starts_with("Prompt/config only"));
+        assert!(specialist_context_policy(
+            ai::service::ModelRole::Curator,
+            ai::service::RouteOrigin::Specific
+        )
+        .contains("Background"));
         assert!(specialist_context_policy(
             ai::service::ModelRole::Vision,
             ai::service::RouteOrigin::MainModel

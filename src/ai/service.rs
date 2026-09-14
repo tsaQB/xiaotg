@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{watch, Mutex, RwLock};
-use tracing::{error, warn};
+use tracing::{debug, error, warn};
 
 use crate::attachments::{
     decode_user_content, delete_session_attachments, encode_user_content, load_attachment,
@@ -2922,8 +2922,6 @@ impl AIChatService {
         .await;
 
         let service_clone = self.clone();
-        let main_provider = provider.clone();
-        let main_model = model.clone();
         let prompt_for_bg = clean_prompt.clone();
         let answer_for_bg = answer_text.clone();
         tokio::spawn(async move {
@@ -2932,8 +2930,6 @@ impl AIChatService {
                     user_id,
                     chat_id,
                     thread_id,
-                    &main_provider,
-                    &main_model,
                     &prompt_for_bg,
                     &answer_for_bg,
                 )
@@ -2943,17 +2939,22 @@ impl AIChatService {
         (thinking_text, answer_text, cancelled)
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn process_background_memory_turn(
         &self,
         user_id: i64,
         chat_id: i64,
         thread_id: i64,
-        provider: &ProviderConfig,
-        model: &str,
         user_prompt: &str,
         assistant_answer: &str,
     ) {
+        let curator_route = match self.resolve_model_route(ModelRole::Curator).await {
+            Ok(route) => route,
+            Err(e) => {
+                debug!("Curator model route disabled or unavailable: {e}");
+                return;
+            }
+        };
+
         let total_count = count_scoped_messages_async(chat_id, thread_id).await;
 
         let text_lower = user_prompt.to_ascii_lowercase();
@@ -2983,8 +2984,8 @@ impl AIChatService {
         if should_extract {
             self.extract_user_facts_background(
                 user_id,
-                provider,
-                model,
+                &curator_route.provider,
+                &curator_route.model,
                 user_prompt,
                 assistant_answer,
             )
@@ -2992,8 +2993,14 @@ impl AIChatService {
         }
 
         if total_count > 20 && (total_count % 20 == 0) {
-            self.summarize_older_history_background(user_id, chat_id, thread_id, provider, model)
-                .await;
+            self.summarize_older_history_background(
+                user_id,
+                chat_id,
+                thread_id,
+                &curator_route.provider,
+                &curator_route.model,
+            )
+            .await;
         }
     }
 
@@ -3005,15 +3012,27 @@ impl AIChatService {
         user_prompt: &str,
         assistant_answer: &str,
     ) {
+        let existing_memories = get_user_memories_async(user_id).await;
+        let mut existing_context = String::new();
+        if !existing_memories.is_empty() {
+            existing_context.push_str("Current known user facts:\n");
+            for (k, f) in &existing_memories {
+                existing_context.push_str(&format!("- {k}: {f}\n"));
+            }
+            existing_context.push('\n');
+        }
+
         let url = provider_url(&provider.endpoint, "chat/completions");
         let extract_prompt = format!(
-            "User input: \"{}\"\nAssistant reply: \"{}\"\n\n\
-            Analyze the user input and extract persistent personal profile facts about the user \
-            (e.g., Name/Callsign, Preferred Language, Tech Stack, Ongoing Projects, Key Preferences, Style, Role/Work). \
+            "{}Recent conversation:\nUser input: \"{}\"\nAssistant reply: \"{}\"\n\n\
+            Analyze the interaction and extract or update persistent personal profile facts about the user \
+            (e.g., Name/Callsign, Preferred Language, Tech Stack, Ongoing Projects, Key Preferences, Style, Role/Work, Location). \
+            If a statement updates or contradicts a previously known fact, output the updated fact with the matching key to supersede it. \
             Respond ONLY with a valid JSON array of objects with \"key\" and \"fact\" properties. \
             Example: [{{\"key\": \"Name\", \"fact\": \"Alex\"}}, {{\"key\": \"Tech Stack\", \"fact\": \"Rust, Linux, Termux\"}}]. \
-            If there are no personal facts about the user in the input, return an empty array []. \
+            If there are no personal facts about the user or nothing new/updated, return an empty array []. \
             Do not output any markdown formatting, thoughts, or explanations, only the raw JSON array.",
+            existing_context,
             truncate_chars(user_prompt, 800),
             truncate_chars(assistant_answer, 400),
         );

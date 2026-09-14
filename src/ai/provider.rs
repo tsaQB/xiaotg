@@ -1105,6 +1105,33 @@ impl AIChatService {
             ModelRole::ImageGeneration => Err(
                 "Image Generation uses the explicit credit-consuming image test path".to_string(),
             ),
+            ModelRole::Curator => {
+                let probe = self
+                    .run_capability_probe_request(
+                        &route.provider,
+                        CapabilityKind::TextChat,
+                        json!({
+                            "model": &route.model,
+                            "messages": [{"role": "user", "content": "Reply with exactly OK."}],
+                            "stream": false,
+                            "max_tokens": 4
+                        }),
+                    )
+                    .await;
+                let validated = validate_text_probe(&probe);
+                match validated {
+                    Some(true) => Ok(format!(
+                        "Curator route {target} passed the text evaluation check"
+                    )),
+                    Some(false) => Err(format!(
+                        "Curator route {target} failed the text evaluation check"
+                    )),
+                    None => Err(format!(
+                        "Curator route {target} was inconclusive: {:?}",
+                        probe.outcome(validated)
+                    )),
+                }
+            }
             ModelRole::Main => unreachable!(),
         }
     }
@@ -1236,7 +1263,10 @@ impl AIChatService {
             record.context_window = Some(ctx);
         }
 
-        let probe_text = matches!(plan, ProbePlan::FullSafe | ProbePlan::Role(ModelRole::Main));
+        let probe_text = matches!(
+            plan,
+            ProbePlan::FullSafe | ProbePlan::Role(ModelRole::Main | ModelRole::Curator)
+        );
         let probe_vision = matches!(
             plan,
             ProbePlan::FullSafe | ProbePlan::Role(ModelRole::Vision)
@@ -1670,7 +1700,7 @@ impl AIChatService {
             )
             .await;
         let kind = match role {
-            ModelRole::Main => CapabilityKind::TextChat,
+            ModelRole::Main | ModelRole::Curator => CapabilityKind::TextChat,
             ModelRole::Vision => CapabilityKind::ImageInput,
             ModelRole::Video => CapabilityKind::VideoInput,
             ModelRole::AudioStt if route.route_origin == RouteOrigin::MainModel => {
