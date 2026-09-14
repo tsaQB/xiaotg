@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::ops::Deref;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::warn;
 
 use super::client_raw as raw;
 use super::models::{
@@ -1252,90 +1252,9 @@ impl TelegramBotClient {
         reply_markup: Option<Value>,
         receiver_user_id: Option<i64>,
     ) -> Result<Value, String> {
-        let validation = rich_message.validate();
-        if validation.is_ok() {
-            let mut payload = json!({
-                "chat_id": chat_id,
-                "rich_message": serde_json::to_value(rich_message).map_err(|error| error.to_string())?,
-            });
-            if let Some(ref reply_markup) = reply_markup {
-                payload["reply_markup"] = reply_markup.clone();
-            }
-            if let Some(receiver_user_id) = receiver_user_id {
-                payload["ephemeral_message_parameters"] =
-                    serde_json::to_value(EphemeralMessageParameters {
-                        receiver_user_id,
-                        callback_query_id: Self::current_delivery_context().callback_query_id,
-                        replace_callback_query_message: Self::replace_callback_query_message(),
-                    })
-                    .unwrap_or(json!({}));
-            }
-            Self::apply_delivery_context(&mut payload, true);
-            let response = self.post_json_raw("sendRichMessage", payload).await?;
-            if response.get("ok").and_then(Value::as_bool) == Some(true) {
-                return Ok(response);
-            }
-            if !fallback_allowed_response(&response) {
-                return Err(Self::telegram_api_error("sendRichMessage", &response));
-            }
-            info!("Telegram rejected Rich Message with a bad request; degrading to safe HTML");
-        } else if let Err(error) = validation {
-            if rich_message.blocks.is_empty() {
-                return Err(error);
-            }
-            info!("Rich Message validation required degradation: {error}");
-        }
-
-        let html_chunks = self
-            .inner
-            .render_blocks_to_html_chunks(&rich_message.blocks, 3800);
-        let total = html_chunks.len();
-        let mut html_last = json!({"ok": true});
-        for (index, chunk) in html_chunks.into_iter().enumerate() {
-            match self
-                .send_message(
-                    chat_id,
-                    &chunk,
-                    Some("HTML"),
-                    if index + 1 == total {
-                        reply_markup.clone()
-                    } else {
-                        None
-                    },
-                    receiver_user_id,
-                    None,
-                )
-                .await
-            {
-                Ok(response) => html_last = response,
-                Err(error) if fallback_allowed_error(&error) => {
-                    let plain_chunks = self
-                        .inner
-                        .render_blocks_to_plain_chunks(&rich_message.blocks, 4000);
-                    let plain_total = plain_chunks.len();
-                    let mut plain_last = json!({"ok": true});
-                    for (plain_index, plain) in plain_chunks.into_iter().enumerate() {
-                        plain_last = self
-                            .send_message(
-                                chat_id,
-                                &plain,
-                                None,
-                                if plain_index + 1 == plain_total {
-                                    reply_markup.clone()
-                                } else {
-                                    None
-                                },
-                                receiver_user_id,
-                                None,
-                            )
-                            .await?;
-                    }
-                    return Ok(plain_last);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(html_last)
+        self.inner
+            .send_rich_message(chat_id, rich_message, reply_markup, receiver_user_id)
+            .await
     }
 
     pub async fn set_my_commands(&self, commands: &[BotCommand]) -> Result<Value, String> {

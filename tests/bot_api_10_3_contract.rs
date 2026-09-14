@@ -198,3 +198,31 @@ fn raw_client_exposes_explicit_delete_ephemeral_message() {
         "raw client must target Telegram deleteEphemeralMessage method"
     );
 }
+
+#[test]
+fn parsed_collage_and_slideshow_serialize_with_10_3_discriminators() {
+    let collage_block = RichBlock::Collage {
+        blocks: vec![
+            serde_json::json!({"type": "photo", "photo": {"type": "photo", "media": "https://example.com/p1.jpg"}}),
+            serde_json::json!({"type": "photo", "photo": {"type": "photo", "media": "https://example.com/p2.jpg"}}),
+        ],
+        caption: Some(models::RichBlockCaption::new(serde_json::json!(
+            "Galeri Foto"
+        ))),
+    };
+    let slideshow_block = RichBlock::Slideshow {
+        blocks: vec![
+            serde_json::json!({"type": "photo", "photo": {"type": "photo", "media": "https://example.com/s1.jpg"}}),
+            serde_json::json!({"type": "photo", "photo": {"type": "photo", "media": "https://example.com/s2.jpg"}}),
+        ],
+        caption: None,
+    };
+    let rich_message = models::InputRichMessage::new(vec![collage_block, slideshow_block]);
+    assert!(rich_message.validate().is_ok());
+    let value =
+        serde_json::to_value(&rich_message).expect("should serialize collage and slideshow");
+    assert_eq!(value["blocks"][0]["type"], "collage");
+    assert_eq!(value["blocks"][0]["blocks"].as_array().unwrap().len(), 2);
+    assert_eq!(value["blocks"][1]["type"], "slideshow");
+    assert_eq!(value["blocks"][1]["blocks"].as_array().unwrap().len(), 2);
+}

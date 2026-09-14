@@ -580,6 +580,87 @@ fn extract_html_attribute<'a>(tag: &'a str, attr: &str) -> Option<&'a str> {
     None
 }
 
+fn format_media_fallback_paragraph(
+    label: &str,
+    link: &str,
+    default_label: &str,
+    emoji: &str,
+) -> RichBlock {
+    let cap_text = if label.is_empty() {
+        default_label
+    } else {
+        label
+    };
+    RichBlock::Paragraph {
+        text: parse_inline(&format!("{emoji} [{cap_text}]({link})")),
+    }
+}
+
+fn parse_multi_media_list_block(
+    link: &str,
+    label: &str,
+    caption: Option<RichBlockCaption>,
+    is_slideshow: bool,
+) -> Option<RichBlock> {
+    let urls: Vec<&str> = link
+        .split(',')
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .collect();
+    let mut valid_blocks = Vec::new();
+    let mut fallback_urls = Vec::new();
+    for u in urls {
+        if is_unsupported_image_format(u) || is_streaming_web_video(u) || is_streaming_web_audio(u)
+        {
+            fallback_urls.push(u);
+        } else {
+            valid_blocks.push(json!({"type": "photo", "photo": {"type": "photo", "media": u}}));
+        }
+    }
+    if valid_blocks.len() >= 2 {
+        if is_slideshow {
+            Some(RichBlock::Slideshow {
+                blocks: valid_blocks,
+                caption,
+            })
+        } else {
+            Some(RichBlock::Collage {
+                blocks: valid_blocks,
+                caption,
+            })
+        }
+    } else if valid_blocks.len() == 1 {
+        let first = valid_blocks.pop().unwrap();
+        let photo_val = first.get("photo").cloned().unwrap_or(first);
+        Some(RichBlock::Photo {
+            photo: photo_val,
+            caption,
+        })
+    } else {
+        let default_title = if is_slideshow {
+            "Slideshow"
+        } else {
+            "Galeri Foto"
+        };
+        let cap_text = if label.is_empty() {
+            default_title
+        } else {
+            label
+        };
+        let item_prefix = if is_slideshow { "Slide" } else { "Foto" };
+        let mut text_parts = format!("🖼️ [{cap_text}]: ");
+        for (idx, u) in fallback_urls.into_iter().enumerate() {
+            if idx > 0 {
+                text_parts.push_str(" • ");
+            }
+            text_parts.push_str(&format!("[{item_prefix} #{}]({u})", idx + 1));
+        }
+        Some(RichBlock::Paragraph {
+            text: parse_inline(&text_parts),
+        })
+    }
+}
+
 fn try_parse_doc_block(line: &str) -> Option<RichBlock> {
     let s = line.trim();
     let s_clean = s.trim_end_matches(['.', ',', ';', ':']);
@@ -697,34 +778,28 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
                         match kind {
                             "photo" => {
                                 if is_streaming_web_video(link) {
-                                    let cap_text = if label.is_empty() {
-                                        "Tonton Video"
-                                    } else {
-                                        label
-                                    };
-                                    return Some(RichBlock::Paragraph {
-                                        text: parse_inline(&format!("🎬 [{cap_text}]({link})")),
-                                    });
+                                    return Some(format_media_fallback_paragraph(
+                                        label,
+                                        link,
+                                        "Tonton Video",
+                                        "🎬",
+                                    ));
                                 }
                                 if is_streaming_web_audio(link) {
-                                    let cap_text = if label.is_empty() {
-                                        "Dengarkan Audio"
-                                    } else {
-                                        label
-                                    };
-                                    return Some(RichBlock::Paragraph {
-                                        text: parse_inline(&format!("🎵 [{cap_text}]({link})")),
-                                    });
+                                    return Some(format_media_fallback_paragraph(
+                                        label,
+                                        link,
+                                        "Dengarkan Audio",
+                                        "🎵",
+                                    ));
                                 }
                                 if is_unsupported_image_format(link) {
-                                    let cap_text = if label.is_empty() {
-                                        "Buka Gambar"
-                                    } else {
-                                        label
-                                    };
-                                    return Some(RichBlock::Paragraph {
-                                        text: parse_inline(&format!("🖼️ [{cap_text}]({link})")),
-                                    });
+                                    return Some(format_media_fallback_paragraph(
+                                        label,
+                                        link,
+                                        "Lihat Foto",
+                                        "🖼️",
+                                    ));
                                 }
                                 return Some(RichBlock::Photo {
                                     photo: json!({"type": "photo", "media": link}),
@@ -733,14 +808,12 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
                             }
                             "video" => {
                                 if is_streaming_web_video(link) {
-                                    let cap_text = if label.is_empty() {
-                                        "Tonton Video"
-                                    } else {
-                                        label
-                                    };
-                                    return Some(RichBlock::Paragraph {
-                                        text: parse_inline(&format!("🎬 [{cap_text}]({link})")),
-                                    });
+                                    return Some(format_media_fallback_paragraph(
+                                        label,
+                                        link,
+                                        "Tonton Video",
+                                        "🎬",
+                                    ));
                                 }
                                 return Some(RichBlock::Video {
                                     video: json!({"type": "video", "media": link}),
@@ -749,14 +822,12 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
                             }
                             "audio" => {
                                 if is_streaming_web_audio(link) {
-                                    let cap_text = if label.is_empty() {
-                                        "Dengarkan Audio"
-                                    } else {
-                                        label
-                                    };
-                                    return Some(RichBlock::Paragraph {
-                                        text: parse_inline(&format!("🎵 [{cap_text}]({link})")),
-                                    });
+                                    return Some(format_media_fallback_paragraph(
+                                        label,
+                                        link,
+                                        "Dengarkan Audio",
+                                        "🎵",
+                                    ));
                                 }
                                 return Some(RichBlock::Audio {
                                     audio: json!({"type": "audio", "media": link}),
@@ -782,97 +853,10 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
                                 });
                             }
                             "collage" => {
-                                let urls: Vec<&str> = link
-                                    .split(',')
-                                    .map(str::trim)
-                                    .filter(|u| !u.is_empty())
-                                    .collect();
-                                let mut valid_blocks = Vec::new();
-                                let mut fallback_urls = Vec::new();
-                                for u in urls {
-                                    if is_unsupported_image_format(u)
-                                        || is_streaming_web_video(u)
-                                        || is_streaming_web_audio(u)
-                                    {
-                                        fallback_urls.push(u);
-                                    } else {
-                                        valid_blocks.push(json!({"type": "photo", "photo": {"type": "photo", "media": u}}));
-                                    }
-                                }
-                                if valid_blocks.len() >= 2 {
-                                    return Some(RichBlock::Collage {
-                                        blocks: valid_blocks,
-                                        caption,
-                                    });
-                                } else if valid_blocks.len() == 1 {
-                                    let first = valid_blocks.pop().unwrap();
-                                    let photo_val = first.get("photo").cloned().unwrap_or(first);
-                                    return Some(RichBlock::Photo {
-                                        photo: photo_val,
-                                        caption,
-                                    });
-                                } else {
-                                    let cap_text = if label.is_empty() {
-                                        "Galeri Foto"
-                                    } else {
-                                        label
-                                    };
-                                    let mut text_parts = format!("🖼️ [{cap_text}]: ");
-                                    for (idx, u) in fallback_urls.into_iter().enumerate() {
-                                        if idx > 0 {
-                                            text_parts.push_str(" • ");
-                                        }
-                                        text_parts.push_str(&format!("[Foto #{}]({u})", idx + 1));
-                                    }
-                                    return Some(RichBlock::Paragraph {
-                                        text: parse_inline(&text_parts),
-                                    });
-                                }
+                                return parse_multi_media_list_block(link, label, caption, false);
                             }
                             "slideshow" => {
-                                let urls: Vec<&str> = link
-                                    .split(',')
-                                    .map(str::trim)
-                                    .filter(|u| !u.is_empty())
-                                    .collect();
-                                let mut valid_blocks = Vec::new();
-                                let mut fallback_urls = Vec::new();
-                                for u in urls {
-                                    if is_unsupported_image_format(u)
-                                        || is_streaming_web_video(u)
-                                        || is_streaming_web_audio(u)
-                                    {
-                                        fallback_urls.push(u);
-                                    } else {
-                                        valid_blocks.push(json!({"type": "photo", "photo": {"type": "photo", "media": u}}));
-                                    }
-                                }
-                                if valid_blocks.len() >= 2 {
-                                    return Some(RichBlock::Slideshow {
-                                        blocks: valid_blocks,
-                                        caption,
-                                    });
-                                } else if valid_blocks.len() == 1 {
-                                    let first = valid_blocks.pop().unwrap();
-                                    let photo_val = first.get("photo").cloned().unwrap_or(first);
-                                    return Some(RichBlock::Photo {
-                                        photo: photo_val,
-                                        caption,
-                                    });
-                                } else {
-                                    let cap_text =
-                                        if label.is_empty() { "Slideshow" } else { label };
-                                    let mut text_parts = format!("🖼️ [{cap_text}]: ");
-                                    for (idx, u) in fallback_urls.into_iter().enumerate() {
-                                        if idx > 0 {
-                                            text_parts.push_str(" • ");
-                                        }
-                                        text_parts.push_str(&format!("[Slide #{}]({u})", idx + 1));
-                                    }
-                                    return Some(RichBlock::Paragraph {
-                                        text: parse_inline(&text_parts),
-                                    });
-                                }
+                                return parse_multi_media_list_block(link, label, caption, true);
                             }
                             "map" => {
                                 let coords_str = if link.starts_with("http") {
@@ -915,26 +899,28 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
                     || link.starts_with("tg://")
                 {
                     if is_streaming_web_video(link) {
-                        let cap_text = if alt.is_empty() { "Tonton Video" } else { alt };
-                        return Some(RichBlock::Paragraph {
-                            text: parse_inline(&format!("🎬 [{cap_text}]({link})")),
-                        });
+                        return Some(format_media_fallback_paragraph(
+                            alt,
+                            link,
+                            "Tonton Video",
+                            "🎬",
+                        ));
                     }
                     if is_streaming_web_audio(link) {
-                        let cap_text = if alt.is_empty() {
-                            "Dengarkan Audio"
-                        } else {
-                            alt
-                        };
-                        return Some(RichBlock::Paragraph {
-                            text: parse_inline(&format!("🎵 [{cap_text}]({link})")),
-                        });
+                        return Some(format_media_fallback_paragraph(
+                            alt,
+                            link,
+                            "Dengarkan Audio",
+                            "🎵",
+                        ));
                     }
                     if is_unsupported_image_format(link) {
-                        let cap_text = if alt.is_empty() { "Buka Gambar" } else { alt };
-                        return Some(RichBlock::Paragraph {
-                            text: parse_inline(&format!("🖼️ [{cap_text}]({link})")),
-                        });
+                        return Some(format_media_fallback_paragraph(
+                            alt,
+                            link,
+                            "Lihat Foto",
+                            "🖼️",
+                        ));
                     }
 
                     let clean_url = link.split('?').next().unwrap_or(link);
@@ -1009,34 +995,28 @@ fn try_parse_html_media_tag(tag: &str) -> Option<RichBlock> {
 
     if s.starts_with("<tg-photo") || s.starts_with("<img") {
         if is_streaming_web_video(src) {
-            let label = if caption_text.is_empty() {
-                "Tonton Video"
-            } else {
-                caption_text
-            };
-            return Some(RichBlock::Paragraph {
-                text: parse_inline(&format!("🎬 [{label}]({src})")),
-            });
+            return Some(format_media_fallback_paragraph(
+                caption_text,
+                src,
+                "Tonton Video",
+                "🎬",
+            ));
         }
         if is_streaming_web_audio(src) {
-            let label = if caption_text.is_empty() {
-                "Dengarkan Audio"
-            } else {
-                caption_text
-            };
-            return Some(RichBlock::Paragraph {
-                text: parse_inline(&format!("🎵 [{label}]({src})")),
-            });
+            return Some(format_media_fallback_paragraph(
+                caption_text,
+                src,
+                "Dengarkan Audio",
+                "🎵",
+            ));
         }
         if is_unsupported_image_format(src) {
-            let label = if caption_text.is_empty() {
-                "Buka Gambar"
-            } else {
-                caption_text
-            };
-            return Some(RichBlock::Paragraph {
-                text: parse_inline(&format!("🖼️ [{label}]({src})")),
-            });
+            return Some(format_media_fallback_paragraph(
+                caption_text,
+                src,
+                "Lihat Foto",
+                "🖼️",
+            ));
         }
         return Some(RichBlock::Photo {
             photo: json!({"type": "photo", "media": src}),
@@ -1046,14 +1026,12 @@ fn try_parse_html_media_tag(tag: &str) -> Option<RichBlock> {
 
     if s.starts_with("<tg-video") {
         if is_streaming_web_video(src) {
-            let label = if caption_text.is_empty() {
-                "Tonton Video"
-            } else {
-                caption_text
-            };
-            return Some(RichBlock::Paragraph {
-                text: parse_inline(&format!("🎬 [{label}]({src})")),
-            });
+            return Some(format_media_fallback_paragraph(
+                caption_text,
+                src,
+                "Tonton Video",
+                "🎬",
+            ));
         }
         return Some(RichBlock::Video {
             video: json!({"type": "video", "media": src}),
@@ -1063,14 +1041,12 @@ fn try_parse_html_media_tag(tag: &str) -> Option<RichBlock> {
 
     if s.starts_with("<tg-audio") {
         if is_streaming_web_audio(src) {
-            let label = if caption_text.is_empty() {
-                "Dengarkan Audio"
-            } else {
-                caption_text
-            };
-            return Some(RichBlock::Paragraph {
-                text: parse_inline(&format!("🎵 [{label}]({src})")),
-            });
+            return Some(format_media_fallback_paragraph(
+                caption_text,
+                src,
+                "Dengarkan Audio",
+                "🎵",
+            ));
         }
         return Some(RichBlock::Audio {
             audio: json!({"type": "audio", "media": src}),
@@ -2790,17 +2766,20 @@ Paragraf normal";
 
     #[test]
     fn unsupported_image_formats_and_streaming_audio_produce_emoji_links() {
-        let text = "[photo: Vektor SVG](https://example.com/logo.svg)\n\n![Audio](https://open.spotify.com/track/12345)\n\n<tg-photo src=\"https://example.com/art.bmp\" caption=\"Gambar Bitmap\"/>";
+        let text = "[photo: Vektor SVG](https://example.com/logo.svg)\n\n![Audio](https://open.spotify.com/track/12345)\n\n<tg-photo src=\"https://example.com/art.bmp\" caption=\"Gambar Bitmap\"/>\n\n![](https://example.com/vector.svg)";
         let blocks = parse_markdown_to_rich_blocks(text);
-        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks.len(), 4);
         assert!(matches!(blocks[0], RichBlock::Paragraph { .. }));
         assert!(matches!(blocks[1], RichBlock::Paragraph { .. }));
         assert!(matches!(blocks[2], RichBlock::Paragraph { .. }));
+        assert!(matches!(blocks[3], RichBlock::Paragraph { .. }));
         let s0 = serde_json::to_string(&blocks[0]).unwrap();
         let s1 = serde_json::to_string(&blocks[1]).unwrap();
         let s2 = serde_json::to_string(&blocks[2]).unwrap();
-        assert!(s0.contains("🖼️") && s0.contains("logo.svg"));
-        assert!(s1.contains("🎵") && s1.contains("spotify.com"));
-        assert!(s2.contains("🖼️") && s2.contains("art.bmp"));
+        let s3 = serde_json::to_string(&blocks[3]).unwrap();
+        assert!(s0.contains("🖼️") && s0.contains("logo.svg") && s0.contains("Vektor SVG"));
+        assert!(s1.contains("🎵") && s1.contains("spotify.com") && s1.contains("Audio"));
+        assert!(s2.contains("🖼️") && s2.contains("art.bmp") && s2.contains("Gambar Bitmap"));
+        assert!(s3.contains("🖼️") && s3.contains("vector.svg") && s3.contains("Lihat Foto"));
     }
 }
