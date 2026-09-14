@@ -2179,34 +2179,42 @@ pub(crate) async fn run_cli_ai_hub(
 
             let total_providers = store.providers.len();
 
-            let mut addon_parts = Vec::new();
+            let mut addon_lines = Vec::new();
             for role in ModelRole::addon_roles() {
                 let route = routing
                     .route(role)
                     .cloned()
                     .unwrap_or(ModelRoute::MainModel);
                 let route_desc = match &route {
-                    ModelRoute::MainModel => "Main".to_string(),
-                    ModelRoute::Disabled => "Off".to_string(),
-                    ModelRoute::Specific { model, .. } => model.clone(),
+                    ModelRoute::MainModel => "Main Model".to_string(),
+                    ModelRoute::Disabled => "Disabled".to_string(),
+                    ModelRoute::Specific { provider_id, model } => {
+                        let prov_name = store
+                            .providers
+                            .iter()
+                            .find(|p| &p.id == provider_id)
+                            .map(|p| p.name.as_str())
+                            .unwrap_or(provider_id);
+                        format!("{prov_name} :: {model}")
+                    }
                 };
                 let label = match role {
                     ModelRole::Vision => "Vision",
                     ModelRole::Video => "Video",
-                    ModelRole::AudioStt => "STT",
-                    ModelRole::ImageGeneration => "Image",
+                    ModelRole::AudioStt => "Audio STT",
+                    ModelRole::ImageGeneration => "Image Gen",
                     _ => role.display_name(),
                 };
-                addon_parts.push(format!("{label}: {route_desc}"));
+                addon_lines.push(format!("     {:<9}: {}", label, route_desc));
             }
-            let addon_summary = addon_parts.join(" | ");
+            let addon_section = addon_lines.join("\r\n");
 
             let title = format!(
                 "== Xiao AI Management Hub ==\r\n\
-                     • Active Model   : {}\r\n\
-                     • Active Provider: {} (Total: {})\r\n\
-                     • Addon Routes   : {}",
-                active_model_name, active_prov_name, total_providers, addon_summary
+                 • Active Model   : {}\r\n\
+                 • Active Provider: {} (Total: {})\r\n\
+                 • Addon Routes:\r\n{}",
+                active_model_name, active_prov_name, total_providers, addon_section
             );
 
             let menu_items = vec![
