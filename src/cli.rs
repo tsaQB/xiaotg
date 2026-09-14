@@ -59,6 +59,85 @@ fn cycle_next(pos: usize, len: usize) -> usize {
     }
 }
 
+pub(crate) const MENU_BAR_WIDTH: usize = 60;
+
+#[inline]
+pub(crate) fn get_terminal_bar_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(w, _)| (w as usize).saturating_sub(2).clamp(40, MENU_BAR_WIDTH))
+        .unwrap_or(MENU_BAR_WIDTH)
+}
+
+#[inline]
+pub(crate) fn visible_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c2 in chars.by_ref() {
+                    if (0x40..=0x7E).contains(&(c2 as u32)) {
+                        break;
+                    }
+                }
+            }
+        } else if !c.is_control() {
+            width += 1;
+        }
+    }
+    width
+}
+
+pub(crate) fn format_tui_title(title: &str) -> Vec<String> {
+    let lines: Vec<&str> = title.lines().collect();
+    if lines.len() <= 1 {
+        let single = title.trim();
+        if single.is_empty() {
+            return Vec::new();
+        }
+        if single.contains("\x1b[") {
+            return vec![single.to_string()];
+        }
+        return vec![format!("\x1b[1;38;5;45m{}\x1b[0m", single)];
+    }
+
+    let mut out = Vec::new();
+    for raw_line in lines {
+        let line = raw_line.trim_end();
+        if line.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let trimmed = line.trim();
+        if trimmed.starts_with("==") && trimmed.ends_with("==") {
+            out.push(format!("\x1b[1;38;5;45m{}\x1b[0m", line));
+        } else if let Some((key, val)) = line.split_once(':') {
+            if trimmed.starts_with('•') || line.starts_with("  ") || line.starts_with('\t') {
+                if val.contains("\x1b[") {
+                    out.push(format!("\x1b[38;5;245m{}:\x1b[0m{}", key, val));
+                } else if val.is_empty() {
+                    out.push(format!("\x1b[38;5;245m{}:\x1b[0m", key));
+                } else {
+                    out.push(format!(
+                        "\x1b[38;5;245m{}:\x1b[0m\x1b[1;37m{}\x1b[0m",
+                        key, val
+                    ));
+                }
+            } else if line.contains("\x1b[") {
+                out.push(line.to_string());
+            } else {
+                out.push(format!("\x1b[1;38;5;45m{}\x1b[0m", line));
+            }
+        } else if line.contains("\x1b[") {
+            out.push(line.to_string());
+        } else {
+            out.push(format!("\x1b[1;38;5;45m{}\x1b[0m", line));
+        }
+    }
+    out
+}
+
 pub fn terminal_interactive_select(
     title: &str,
     items: &[String],
@@ -100,42 +179,63 @@ pub fn terminal_interactive_select(
             top_idx = selected_pos + 1 - page_size;
         }
 
+        let bar_width = get_terminal_bar_width();
+        let num_width = if filtered.len() >= 100 { 3 } else { 2 };
         let mut buffer = Vec::new();
-        buffer.push(format!("\x1b[1;36m{}\x1b[0m", title));
+
+        let formatted_title = format_tui_title(title);
+        let title_len = formatted_title.len();
+        for line in formatted_title {
+            buffer.push(line);
+        }
+
         if allow_search {
             buffer.push(format!(
-                "\x1b[33mFilter:\x1b[0m \x1b[1;37m{}\x1b[38;5;244m_  \x1b[38;5;240m[▲/▼ Geser · Enter Pilih · Esc Batal]\x1b[0m",
+                " \x1b[38;5;245mFilter:\x1b[0m \x1b[1;37m{}\x1b[38;5;81m_\x1b[0m",
                 query
             ));
-        } else {
-            buffer.push("\x1b[38;5;243m[▲/▼ Geser · Enter Pilih · Esc Batal]\x1b[0m".to_string());
+        } else if title_len > 1 {
+            buffer.push(String::new());
         }
-        buffer.push(
-            "\x1b[38;5;238m────────────────────────────────────────────────────────────\x1b[0m"
-                .to_string(),
-        );
+
+        buffer.push(format!("\x1b[38;5;238m{}\x1b[0m", "─".repeat(bar_width)));
 
         if filtered.is_empty() {
-            buffer.push("  \x1b[31mTidak ada pilihan yang cocok dengan filter.\x1b[0m".to_string());
+            buffer.push(
+                "  \x1b[38;5;244mTidak ada pilihan yang cocok dengan filter.\x1b[0m".to_string(),
+            );
         } else {
             let end_idx = (top_idx + page_size).min(filtered.len());
             if top_idx > 0 {
-                buffer.push("  \x1b[38;5;240m▲ (lebih banyak di atas)\x1b[0m".to_string());
+                buffer.push(format!(
+                    "  \x1b[38;5;240m▲ ({} pilihan lagi di atas)\x1b[0m",
+                    top_idx
+                ));
             }
             for (curr_idx, (orig_idx, item_text)) in filtered[top_idx..end_idx].iter().enumerate() {
                 let actual_idx = top_idx + curr_idx;
                 let is_sel = actual_idx == selected_pos;
                 if is_sel {
+                    let item_for_selected =
+                        item_text.replace("\x1b[0m", "\x1b[0m\x1b[48;5;237m\x1b[1;37m");
+                    let prefix_vis = 3 + num_width + 2;
+                    let item_vis = visible_width(item_text);
+                    let pad = bar_width.saturating_sub(prefix_vis + item_vis);
+                    let padding = " ".repeat(pad);
                     buffer.push(format!(
-                        "\x1b[1;32m ❯ \x1b[1;37m{:>2}. {}\x1b[0m",
+                        "\x1b[48;5;237m\x1b[1;38;5;81m ▸ \x1b[1;37m{:>num_width$}. {}{}\x1b[0m",
                         orig_idx + 1,
-                        item_text
+                        item_for_selected,
+                        padding,
+                        num_width = num_width
                     ));
                 } else {
+                    let item_for_unselected = item_text.replace("\x1b[0m", "\x1b[0m\x1b[38;5;250m");
                     buffer.push(format!(
-                        "   \x1b[38;5;244m{:>2}. \x1b[38;5;250m{}\x1b[0m",
+                        "   \x1b[38;5;248m{:>num_width$}. \x1b[38;5;250m{}\x1b[0m",
                         orig_idx + 1,
-                        item_text
+                        item_for_unselected,
+                        num_width = num_width
                     ));
                 }
             }
@@ -146,10 +246,30 @@ pub fn terminal_interactive_select(
                 ));
             }
         }
-        buffer.push(
-            "\x1b[38;5;238m────────────────────────────────────────────────────────────\x1b[0m"
-                .to_string(),
-        );
+        buffer.push(format!("\x1b[38;5;238m{}\x1b[0m", "─".repeat(bar_width)));
+
+        let curr = if filtered.is_empty() {
+            0
+        } else {
+            selected_pos + 1
+        };
+        let total = filtered.len();
+        let scroll_hint = if total > page_size {
+            let end_idx = (top_idx + page_size).min(total);
+            format!(" ({}-{} dari {})", top_idx + 1, end_idx, total)
+        } else {
+            String::new()
+        };
+
+        if allow_search {
+            buffer.push(format!(
+                "\x1b[38;5;243m[{curr}/{total}]{scroll_hint} • [▲/▼] Geser · [Enter] Pilih · [Ketik] Filter · [Esc] Batal\x1b[0m"
+            ));
+        } else {
+            buffer.push(format!(
+                "\x1b[38;5;243m[{curr}/{total}]{scroll_hint} • [▲/▼] Geser · [Enter] Pilih · [Esc] Batal\x1b[0m"
+            ));
+        }
 
         let _ = execute!(
             stdout,
@@ -232,52 +352,105 @@ pub fn terminal_interactive_multi_select(
             cursor_idx = cursor_idx.min(filtered.len() - 1);
             if cursor_idx < top_idx {
                 top_idx = cursor_idx;
-            }
-            if cursor_idx >= top_idx + page_size {
+            } else if cursor_idx >= top_idx + page_size {
                 top_idx = cursor_idx + 1 - page_size;
             }
         }
-        let end_idx = (top_idx + page_size).min(filtered.len());
-        let mut buffer = vec![format!("\x1b[1;36m{}\x1b[0m", title)];
+
+        let bar_width = get_terminal_bar_width();
+        let num_width = if filtered.len() >= 100 { 3 } else { 2 };
+        let mut buffer = Vec::new();
+
+        for line in format_tui_title(title) {
+            buffer.push(line);
+        }
+
         buffer.push(format!(
-            "\x1b[33mFilter:\x1b[0m \x1b[1;37m{}_\x1b[0m  \x1b[38;5;240m[▲/▼ Geser · Spasi Centang · Enter Simpan · Esc Batal]\x1b[0m",
+            " \x1b[38;5;245mFilter:\x1b[0m \x1b[1;37m{}\x1b[38;5;81m_\x1b[0m",
             query
         ));
-        buffer.push(format!(
-            "\x1b[38;5;244mTerpilih: {}/{} · Menampilkan {}-{} dari {}\x1b[0m",
-            picked.iter().filter(|v| **v).count(),
-            max_selected,
-            if filtered.is_empty() { 0 } else { top_idx + 1 },
-            end_idx,
-            filtered.len()
-        ));
-        buffer.push(
-            "\x1b[38;5;238m────────────────────────────────────────────────────────────\x1b[0m"
-                .to_string(),
-        );
-        for (display_idx, idx) in filtered[top_idx..end_idx].iter().enumerate() {
-            let marker = if picked[*idx] { "[x]" } else { "[ ]" };
-            let is_cursor = top_idx + display_idx == cursor_idx;
-            if is_cursor {
+
+        buffer.push(format!("\x1b[38;5;238m{}\x1b[0m", "─".repeat(bar_width)));
+
+        let end_idx = (top_idx + page_size).min(filtered.len());
+        if filtered.is_empty() {
+            buffer.push(
+                "  \x1b[38;5;244mTidak ada pilihan yang cocok dengan filter.\x1b[0m".to_string(),
+            );
+        } else {
+            if top_idx > 0 {
                 buffer.push(format!(
-                    "\x1b[1;32m ❯ \x1b[1;37m{} {:>3}. {}\x1b[0m",
-                    marker,
-                    idx + 1,
-                    items[*idx]
+                    "  \x1b[38;5;240m▲ ({} item lagi di atas)\x1b[0m",
+                    top_idx
                 ));
-            } else {
+            }
+            for (display_idx, idx) in filtered[top_idx..end_idx].iter().enumerate() {
+                let actual_idx = top_idx + display_idx;
+                let is_cursor = actual_idx == cursor_idx;
+                let is_checked = picked[*idx];
+                let item_text = &items[*idx];
+
+                if is_cursor {
+                    let marker = if is_checked {
+                        "\x1b[1;38;5;48m[x]\x1b[0m\x1b[48;5;237m\x1b[1;37m"
+                    } else {
+                        "\x1b[38;5;244m[ ]\x1b[0m\x1b[48;5;237m\x1b[1;37m"
+                    };
+                    let item_for_selected =
+                        item_text.replace("\x1b[0m", "\x1b[0m\x1b[48;5;237m\x1b[1;37m");
+                    let prefix_vis = 3 + 4 + num_width + 2;
+                    let item_vis = visible_width(item_text);
+                    let pad = bar_width.saturating_sub(prefix_vis + item_vis);
+                    let padding = " ".repeat(pad);
+                    buffer.push(format!(
+                        "\x1b[48;5;237m\x1b[1;38;5;81m ▸ \x1b[1;37m{} {:>num_width$}. {}{}\x1b[0m",
+                        marker,
+                        idx + 1,
+                        item_for_selected,
+                        padding,
+                        num_width = num_width
+                    ));
+                } else {
+                    let marker = if is_checked {
+                        "\x1b[1;38;5;48m[x]\x1b[0m"
+                    } else {
+                        "\x1b[38;5;244m[ ]\x1b[0m"
+                    };
+                    let item_for_unselected = item_text.replace("\x1b[0m", "\x1b[0m\x1b[38;5;250m");
+                    buffer.push(format!(
+                        "   {} \x1b[38;5;248m{:>num_width$}. \x1b[38;5;250m{}\x1b[0m",
+                        marker,
+                        idx + 1,
+                        item_for_unselected,
+                        num_width = num_width
+                    ));
+                }
+            }
+            if end_idx < filtered.len() {
                 buffer.push(format!(
-                    "   \x1b[38;5;244m{} {:>3}. \x1b[38;5;250m{}\x1b[0m",
-                    marker,
-                    idx + 1,
-                    items[*idx]
+                    "  \x1b[38;5;240m▼ ({} item lagi di bawah)\x1b[0m",
+                    filtered.len() - end_idx
                 ));
             }
         }
-        buffer.push(
-            "\x1b[38;5;238m────────────────────────────────────────────────────────────\x1b[0m"
-                .to_string(),
-        );
+
+        buffer.push(format!("\x1b[38;5;238m{}\x1b[0m", "─".repeat(bar_width)));
+
+        let picked_count = picked.iter().filter(|v| **v).count();
+        let curr = if filtered.is_empty() {
+            0
+        } else {
+            cursor_idx + 1
+        };
+        let total = filtered.len();
+        let scroll_hint = if total > page_size {
+            format!(" ({}-{} dari {})", top_idx + 1, end_idx, total)
+        } else {
+            String::new()
+        };
+        buffer.push(format!(
+            "\x1b[38;5;243m[{picked_count}/{max_selected} terpilih | kursor {curr}/{total}]{scroll_hint} • [▲/▼] Geser · [Spasi] Pilih · [Enter] Simpan · [Esc] Batal\x1b[0m"
+        ));
 
         let _ = execute!(
             stdout,
@@ -2186,8 +2359,8 @@ pub(crate) async fn run_cli_ai_hub(
                     .cloned()
                     .unwrap_or(ModelRoute::MainModel);
                 let route_desc = match &route {
-                    ModelRoute::MainModel => "Main Model".to_string(),
-                    ModelRoute::Disabled => "Disabled".to_string(),
+                    ModelRoute::MainModel => "\x1b[38;5;37mMain Model\x1b[0m".to_string(),
+                    ModelRoute::Disabled => "\x1b[38;5;241mDisabled\x1b[0m".to_string(),
                     ModelRoute::Specific { provider_id, model } => {
                         let prov_name = store
                             .providers
@@ -2195,7 +2368,7 @@ pub(crate) async fn run_cli_ai_hub(
                             .find(|p| &p.id == provider_id)
                             .map(|p| p.name.as_str())
                             .unwrap_or(provider_id);
-                        format!("{prov_name} :: {model}")
+                        format!("\x1b[38;5;75m{prov_name} :: {model}\x1b[0m")
                     }
                 };
                 let label = match role {
@@ -2598,5 +2771,52 @@ mod tests {
         assert_eq!(cycle_next(0, 1), 0);
         assert_eq!(cycle_prev(10, 5), 4);
         assert_eq!(cycle_next(10, 5), 0);
+    }
+
+    #[test]
+    fn test_visible_width() {
+        assert_eq!(visible_width(""), 0);
+        assert_eq!(visible_width("Hello World"), 11);
+        assert_eq!(visible_width("\x1b[1;32m[AKTIF]\x1b[0m"), 7);
+        assert_eq!(visible_width("\x1b[38;5;81m ▸ \x1b[0m"), 3);
+        assert_eq!(
+            visible_width("\x1b[48;5;237m\x1b[1;38;5;81m ▸ \x1b[1;37m 1. Model\x1b[0m"),
+            12
+        );
+        assert_eq!(
+            visible_width("OpenAI \x1b[1;32m[AKTIF]\x1b[0m (gpt-4o)"),
+            23
+        );
+    }
+
+    #[test]
+    fn test_format_tui_title() {
+        // Single line title
+        let single = format_tui_title("Pilih Main Model:");
+        assert_eq!(single.len(), 1);
+        assert!(single[0].contains("Pilih Main Model:"));
+        assert!(single[0].contains("\x1b[1;38;5;45m"));
+
+        // Single line already containing ANSI
+        let colored = format_tui_title("\x1b[1;36mTitle\x1b[0m");
+        assert_eq!(colored.len(), 1);
+        assert_eq!(colored[0], "\x1b[1;36mTitle\x1b[0m");
+
+        // Multi-line title
+        let multi = "== Xiao AI Management Hub ==\r\n • Active Model   : gpt-4o\r\n • Addon Routes:\r\n     Vision   : \x1b[38;5;37mMain Model\x1b[0m";
+        let res = format_tui_title(multi);
+        assert_eq!(res.len(), 4);
+        assert!(res[0].contains("\x1b[1;38;5;45m== Xiao AI Management Hub ==\x1b[0m"));
+        assert!(res[1].contains("\x1b[38;5;245m • Active Model   :\x1b[0m"));
+        assert!(res[1].contains("\x1b[1;37m gpt-4o\x1b[0m"));
+        assert!(res[2].contains("\x1b[38;5;245m • Addon Routes:\x1b[0m"));
+        assert!(res[3].contains("\x1b[38;5;245m     Vision   :\x1b[0m"));
+        assert!(res[3].contains("\x1b[38;5;37mMain Model\x1b[0m"));
+    }
+
+    #[test]
+    fn test_menu_bar_width_bounds() {
+        let width = get_terminal_bar_width();
+        assert!((40..=MENU_BAR_WIDTH).contains(&width));
     }
 }
