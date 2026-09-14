@@ -1,6 +1,8 @@
 use rand::Rng;
 use std::env;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::ai::AIChatService;
 use crate::bot::client::TelegramBotClient;
@@ -17,8 +19,8 @@ use crossterm::{
 };
 
 use crate::ai::service::{
-    load_provider_store, save_provider_store, CapabilityKind, CapabilityState, ModelRole,
-    ModelRoute, ProbeEvent, ProbeOutcome, ProviderConfig,
+    load_provider_store, save_provider_store, CapabilityKind, CapabilityState, GenerationInput,
+    ModelRole, ModelRoute, ProbeEvent, ProbeOutcome, ProviderConfig,
 };
 use crate::ai::storage::ProviderStore;
 
@@ -2625,6 +2627,305 @@ pub(crate) async fn run_cli_ai_hub(
     }
 }
 
+pub(crate) async fn run_cli_chat(ai_service: &AIChatService, initial_prompt: Option<String>) {
+    load_environment();
+
+    if !ai_service.has_configured_provider(0).await {
+        println!("\n\x1b[33m⚠ Belum ada AI Provider yang terkonfigurasi.\x1b[0m");
+        println!("\x1b[38;5;244mMenjalankan Setup Wizard untuk konfigurasi awal...\x1b[0m\n");
+        let _ = run_cli_quickstart_wizard(ai_service).await;
+        if !ai_service.has_configured_provider(0).await {
+            println!("\n\x1b[31m✖ Setup dibatalkan. Tidak ada provider aktif untuk chat.\x1b[0m\n");
+            return;
+        }
+    }
+
+    let main_route = match ai_service.resolve_model_route(ModelRole::Main).await {
+        Ok(r) => r,
+        Err(e) => {
+            println!("\n\x1b[31m✖ Error: Main Model tidak tersedia: {e}\x1b[0m\n");
+            return;
+        }
+    };
+
+    let model_name = main_route.model.clone();
+    let provider_name = main_route.provider.name.clone();
+    let user_id = get_configured_owner_id().unwrap_or(0);
+
+    // Ensure session is initialized
+    let _ = ai_service.get_sessions(user_id).await;
+
+    // One-shot prompt mode
+    if let Some(prompt) = initial_prompt.filter(|p| !p.trim().is_empty()) {
+        execute_cli_chat_turn(ai_service, user_id, &prompt, &model_name, false).await;
+        return;
+    }
+
+    // Interactive REPL mode
+    let bar_width = get_terminal_bar_width();
+    println!("\x1b[1;38;5;45m== Xiao Terminal Chat ==\x1b[0m");
+    println!(
+        " \x1b[38;5;245m• Model   :\x1b[0m \x1b[1;37m{} \x1b[38;5;244m({})\x1b[0m",
+        model_name, provider_name
+    );
+    let active_session = ai_service.get_active_session(user_id).await;
+    if let Some(sess) = active_session {
+        println!(
+            " \x1b[38;5;245m• Session :\x1b[0m \x1b[1;37m#{} — {}\x1b[0m \x1b[38;5;244m({} pesan)\x1b[0m",
+            sess.id, sess.name, sess.messages.len()
+        );
+    }
+    println!(
+        " \x1b[38;5;245m• Bantuan :\x1b[0m \x1b[38;5;244mKetik pesan lalu tekan Enter. Perintah: /clear, /new, /sessions, /switch, /exit\x1b[0m"
+    );
+    println!("\x1b[38;5;238m{}\x1b[0m\n", "─".repeat(bar_width));
+
+    let stdin = io::stdin();
+    loop {
+        print!("\x1b[1;38;5;81mYou ▸ \x1b[0m");
+        let _ = io::stdout().flush();
+
+        let mut input = String::new();
+        match stdin.read_line(&mut input) {
+            Ok(0) => {
+                println!("\n\x1b[38;5;244mChat selesai.\x1b[0m\n");
+                break;
+            }
+            Err(_) => {
+                println!("\n\x1b[38;5;244mChat selesai.\x1b[0m\n");
+                break;
+            }
+            Ok(_) => {}
+        }
+
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.starts_with('/') {
+            let lower = trimmed.to_lowercase();
+            if lower == "/exit" || lower == "/quit" || lower == "/q" {
+                println!("\x1b[38;5;244mSampai jumpa!\x1b[0m\n");
+                break;
+            } else if lower == "/clear" || lower == "/reset" {
+                if ai_service.clear_history(user_id).await {
+                    println!("\x1b[1;32m✔ Riwayat percakapan sesi ini telah dibersihkan.\x1b[0m\n");
+                } else {
+                    println!("\x1b[31m✖ Gagal membersihkan riwayat sesi.\x1b[0m\n");
+                }
+                continue;
+            } else if lower == "/sessions" {
+                let sessions = ai_service.get_sessions(user_id).await;
+                let active_id = ai_service.get_active_session_id(user_id).await.unwrap_or(0);
+                println!("\n\x1b[1;37mDaftar Sesi Percakapan:\x1b[0m");
+                for s in &sessions {
+                    let marker = if s.id == active_id {
+                        "\x1b[1;32m[x]\x1b[0m"
+                    } else {
+                        "\x1b[38;5;244m[ ]\x1b[0m"
+                    };
+                    let act_label = if s.id == active_id {
+                        " \x1b[1;32m(Aktif)\x1b[0m"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  {} #{:<2} — {:<24} \x1b[38;5;244m({} pesan, {}){}\x1b[0m",
+                        marker,
+                        s.id,
+                        s.name,
+                        s.messages.len(),
+                        s.created_at,
+                        act_label
+                    );
+                }
+                println!("\x1b[38;5;244mGunakan '/switch <id>' untuk berpindah sesi atau '/new [nama]' untuk membuat sesi baru.\x1b[0m\n");
+                continue;
+            } else if lower.starts_with("/switch") {
+                let parts: Vec<&str> = trimmed.split_whitespace().collect();
+                if parts.len() < 2 {
+                    println!("\x1b[33mPenggunaan: /switch <id_sesi> (contoh: /switch 1)\x1b[0m\n");
+                } else if let Ok(target_id) = parts[1].parse::<usize>() {
+                    if ai_service.switch_session_by_id(user_id, target_id).await {
+                        if let Some(s) = ai_service.get_active_session(user_id).await {
+                            println!("\x1b[1;32m✔ Beralih ke sesi #{}: {}\x1b[0m\n", s.id, s.name);
+                        } else {
+                            println!("\x1b[1;32m✔ Beralih ke sesi #{}\x1b[0m\n", target_id);
+                        }
+                    } else {
+                        println!("\x1b[31m✖ Sesi #{} tidak ditemukan.\x1b[0m\n", target_id);
+                    }
+                } else {
+                    println!("\x1b[31m✖ ID sesi harus berupa angka.\x1b[0m\n");
+                }
+                continue;
+            } else if lower.starts_with("/new") {
+                let custom_name = if trimmed.len() > 4 {
+                    let n = trimmed[4..].trim();
+                    if n.is_empty() {
+                        None
+                    } else {
+                        Some(n)
+                    }
+                } else {
+                    None
+                };
+                if let Some(new_sess) = ai_service.create_new_session(user_id, custom_name).await {
+                    println!(
+                        "\x1b[1;32m✔ Sesi baru berhasil dibuat: #{} — {}\x1b[0m\n",
+                        new_sess.id, new_sess.name
+                    );
+                } else {
+                    println!("\x1b[31m✖ Gagal membuat sesi baru.\x1b[0m\n");
+                }
+                continue;
+            } else if lower == "/model" {
+                match ai_service.resolve_model_route(ModelRole::Main).await {
+                    Ok(r) => {
+                        println!(
+                            "  \x1b[38;5;245mActive Model   :\x1b[0m \x1b[1;37m{}\x1b[0m",
+                            r.model
+                        );
+                        println!(
+                            "  \x1b[38;5;245mActive Provider:\x1b[0m \x1b[1;37m{}\x1b[0m \x1b[38;5;244m({})\x1b[0m\n",
+                            r.provider.name, r.provider.endpoint
+                        );
+                    }
+                    Err(e) => {
+                        println!("\x1b[31m✖ Error: {e}\x1b[0m\n");
+                    }
+                }
+                continue;
+            } else if lower == "/help" {
+                println!("\x1b[1;37mPerintah Chat Tersedia:\x1b[0m");
+                println!(
+                    "  \x1b[36m/clear\x1b[0m          - Bersihkan riwayat percakapan sesi aktif"
+                );
+                println!(
+                    "  \x1b[36m/new [nama]\x1b[0m     - Buat dan aktifkan sesi percakapan baru"
+                );
+                println!(
+                    "  \x1b[36m/sessions\x1b[0m       - Tampilkan daftar semua sesi percakapan"
+                );
+                println!("  \x1b[36m/switch <id>\x1b[0m    - Beralih ke sesi percakapan tertentu");
+                println!("  \x1b[36m/model\x1b[0m          - Tampilkan informasi model dan provider aktif");
+                println!("  \x1b[36m/help\x1b[0m           - Tampilkan bantuan perintah");
+                println!("  \x1b[36m/exit\x1b[0m           - Keluar dari mode chat (atau Ctrl+C / Ctrl+D)\n");
+                continue;
+            } else {
+                println!(
+                    "\x1b[33mPerintah '{}' tidak dikenal. Ketik /help untuk bantuan.\x1b[0m\n",
+                    trimmed
+                );
+                continue;
+            }
+        }
+
+        execute_cli_chat_turn(ai_service, user_id, trimmed, &model_name, true).await;
+    }
+}
+
+async fn execute_cli_chat_turn(
+    ai_service: &AIChatService,
+    user_id: i64,
+    prompt: &str,
+    model_name: &str,
+    interactive: bool,
+) {
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+    let is_tty = io::stdout().is_terminal();
+
+    let spinner_done = Arc::new(AtomicBool::new(false));
+    let spinner_done_clone = spinner_done.clone();
+    let spinner_handle = if is_tty {
+        Some(tokio::spawn(async move {
+            let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut idx = 0;
+            let start = std::time::Instant::now();
+            while !spinner_done_clone.load(Ordering::Relaxed) {
+                let elapsed = start.elapsed().as_secs_f64();
+                print!(
+                    "\r\x1b[38;5;81m{}\x1b[0m \x1b[38;5;244mXiao sedang memproses... ({:.1}s)\x1b[0m",
+                    frames[idx % frames.len()],
+                    elapsed
+                );
+                let _ = io::stdout().flush();
+                idx = (idx + 1) % frames.len();
+                tokio::time::sleep(tokio::time::Duration::from_millis(80)).await;
+            }
+            print!("\r\x1b[2K");
+            let _ = io::stdout().flush();
+        }))
+    } else {
+        None
+    };
+
+    let generation_input = GenerationInput {
+        prompt,
+        canonical_prompt: None,
+        media_to_main: false,
+        timeline: None,
+        image_bytes: None,
+        document_images: None,
+        mime_type: None,
+        doc_text: None,
+        doc_name: None,
+        audio_bytes: None,
+        audio_mime: None,
+        video_bytes: None,
+        video_mime: None,
+        video_duration: None,
+    };
+
+    let start = std::time::Instant::now();
+
+    tokio::select! {
+        res = ai_service.generate_response(user_id, generation_input, &mut cancel_rx) => {
+            spinner_done.store(true, Ordering::Relaxed);
+            if let Some(handle) = spinner_handle {
+                let _ = handle.await;
+            }
+
+            let (thinking, answer, cancelled) = res;
+            let elapsed = start.elapsed().as_secs_f64();
+
+            if cancelled {
+                println!("\r\x1b[33m⚠ Permintaan dibatalkan.\x1b[0m\n");
+                return;
+            }
+
+            if is_tty {
+                if let Some(think) = thinking.filter(|t| !t.trim().is_empty()) {
+                    println!("\x1b[38;5;242m┌─ Penalaran / Thinking ──────────────────────────\x1b[0m");
+                    for line in think.trim().lines() {
+                        println!("\x1b[38;5;242m│ {}\x1b[0m", line);
+                    }
+                    println!("\x1b[38;5;242m└────────────────────────────────────────────────\x1b[0m");
+                }
+
+                if interactive {
+                    println!("\x1b[1;38;5;81mXiao ▸\x1b[0m {}", answer.trim());
+                    println!("\x1b[38;5;243m[{:.1}s • {}]\x1b[0m\n", elapsed, model_name);
+                } else {
+                    println!("\x1b[1;38;5;81mXiao ▸\x1b[0m {}", answer.trim());
+                    println!("\x1b[38;5;243m[{:.1}s • {}]\x1b[0m", elapsed, model_name);
+                }
+            } else {
+                println!("{}", answer.trim());
+            }
+        }
+        _ = tokio::signal::ctrl_c() => {
+            spinner_done.store(true, Ordering::Relaxed);
+            if let Some(handle) = spinner_handle {
+                let _ = handle.await;
+            }
+            let _ = cancel_tx.send(true);
+            println!("\r\x1b[33m⚠ Permintaan dibatalkan oleh pengguna (Ctrl+C).\x1b[0m\n");
+        }
+    }
+}
+
 pub(crate) fn print_cli_help() {
     println!(
         "\n\x1b[1;36mxiao v{} — AI Assistant Bot\x1b[0m\n",
@@ -2634,6 +2935,7 @@ pub(crate) fn print_cli_help() {
     println!("  xiao <command>\n");
     println!("\x1b[1;37mCommands:\x1b[0m");
     println!("  \x1b[36mstart\x1b[0m               Run bot daemon (default)");
+    println!("  \x1b[36mchat [prompt]\x1b[0m       Direct terminal chat mode (Interactive REPL or one-shot prompt)");
     println!(
         "  \x1b[36msetup\x1b[0m               Interactive initial setup wizard (AI -> Telegram)"
     );
@@ -2642,6 +2944,11 @@ pub(crate) fn print_cli_help() {
     println!("  \x1b[36mgateway [action]\x1b[0m    Manage Telegram messaging gateway (Token & Owner ID) [Interactive/One-Liner]");
     println!("  \x1b[36mversion, -v\x1b[0m         Display binary version");
     println!("  \x1b[36mhelp\x1b[0m                Show this help message\n");
+    println!("\x1b[1;37mUsage for 'chat':\x1b[0m");
+    println!("     \x1b[36mxiao chat\x1b[0m               Start interactive terminal chat session");
+    println!(
+        "     \x1b[36mxiao chat <prompt>\x1b[0m      Send one-shot query and print response\n"
+    );
     println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
     println!("     \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
     println!("     \x1b[36mxiao ai use <model>\x1b[0m Switch Main Model directly");

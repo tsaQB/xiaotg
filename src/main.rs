@@ -2958,6 +2958,15 @@ async fn main() {
             run_cli_addon_menu(&ai_service).await;
             return;
         }
+        "chat" => {
+            let prompt_arg = if args.len() > 2 {
+                Some(args[2..].join(" "))
+            } else {
+                None
+            };
+            run_cli_chat(&ai_service, prompt_arg).await;
+            return;
+        }
         "help" | "--help" | "-h" => {
             print_cli_help();
             return;

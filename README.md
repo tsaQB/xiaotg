@@ -113,8 +113,9 @@ Empat addon spesialis dapat dikonfigurasi ke salah satu dari 3 status:
 Semua administrasi bot dilakukan melalui perintah tunggal baku `xiao`:
 
 ```bash
-# Operasional
-xiao start          # Jalankan bot daemon di latar depan
+# Operasional Bot & Chat Terminal
+xiao start          # Jalankan bot daemon Telegram di foreground
+xiao chat [prompt]  # Buka chat interaktif langsung di terminal atau one-shot prompt
 xiao setup          # Wizard interaktif 2 tahap (Provider AI ➔ Gateway Telegram)
 xiao status         # Dashboard status sistem lengkap & ringkas
 

@@ -65,6 +65,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 The binary supports both interactive management and headless daemon modes:
 ```bash
 cargo run -- start               # Run the bot daemon in foreground (default subcommand)
+cargo run -- chat [prompt]       # Direct terminal chat mode (Interactive REPL or one-shot prompt)
 cargo run -- setup               # 2-step interactive configuration wizard (AI -> Telegram)
 cargo run -- status              # Display system, database, and provider status
 cargo run -- ai                  # Open interactive unified AI management hub
