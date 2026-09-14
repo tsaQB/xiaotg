@@ -28,15 +28,15 @@ fn attachment_root() -> PathBuf {
     base.join(".local/share/xiaoai/attachments")
 }
 
-fn session_dir(user_id: i64, session_id: usize) -> PathBuf {
+fn scope_dir(chat_id: i64, thread_id: i64) -> PathBuf {
     attachment_root()
-        .join(user_id.to_string())
-        .join(session_id.to_string())
+        .join(chat_id.to_string())
+        .join(thread_id.to_string())
 }
 
 pub async fn persist_attachment(
-    user_id: i64,
-    session_id: usize,
+    chat_id: i64,
+    thread_id: i64,
     kind: &str,
     mime_type: &str,
     name: Option<&str>,
@@ -59,7 +59,7 @@ pub async fn persist_attachment(
         .collect();
     let extension = extension_for_mime(mime_type);
     let file_name = format!("{random}.{extension}");
-    let dir = session_dir(user_id, session_id);
+    let dir = scope_dir(chat_id, thread_id);
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|err| format!("create attachment directory: {err}"))?;
@@ -105,8 +105,8 @@ async fn harden_file_permissions(_path: &std::path::Path) -> Result<(), String> 
 }
 
 pub async fn load_attachment(
-    user_id: i64,
-    session_id: usize,
+    chat_id: i64,
+    thread_id: i64,
     attachment: &AttachmentRef,
 ) -> Result<Vec<u8>, String> {
     if attachment.file_name.contains('/')
@@ -115,7 +115,7 @@ pub async fn load_attachment(
     {
         return Err("invalid attachment filename".to_string());
     }
-    let path = session_dir(user_id, session_id).join(&attachment.file_name);
+    let path = scope_dir(chat_id, thread_id).join(&attachment.file_name);
     let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|err| format!("attachment metadata: {err}"))?;
@@ -127,16 +127,25 @@ pub async fn load_attachment(
         .map_err(|err| format!("read attachment: {err}"))
 }
 
-pub async fn delete_session_attachments(user_id: i64, session_id: usize) {
-    let _ = tokio::fs::remove_dir_all(session_dir(user_id, session_id)).await;
+pub async fn delete_scoped_attachments(chat_id: i64, thread_id: i64) {
+    let _ = tokio::fs::remove_dir_all(scope_dir(chat_id, thread_id)).await;
 }
 
+#[allow(dead_code)]
+pub async fn delete_session_attachments(user_id: i64, session_id: usize) {
+    let base = attachment_root()
+        .join(user_id.to_string())
+        .join(session_id.to_string());
+    let _ = tokio::fs::remove_dir_all(base).await;
+}
+
+#[allow(dead_code)]
 pub async fn delete_attachment_refs(
     user_id: i64,
     session_id: usize,
     attachments: &[AttachmentRef],
 ) {
-    let dir = session_dir(user_id, session_id);
+    let dir = scope_dir(user_id, session_id as i64);
     for attachment in attachments {
         if attachment.file_name.contains('/')
             || attachment.file_name.contains('\\')

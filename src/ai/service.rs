@@ -13,8 +13,8 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tracing::{error, warn};
 
 use crate::attachments::{
-    decode_user_content, delete_attachment_refs, delete_session_attachments, encode_user_content,
-    load_attachment, persist_attachment,
+    decode_user_content, delete_session_attachments, encode_user_content, load_attachment,
+    persist_attachment,
 };
 use crate::bot::url_policy::is_unsafe_remote_ip;
 use crate::util::{truncate_chars, truncate_chars_with_ellipsis};
@@ -31,16 +31,17 @@ pub use super::routing::{
 };
 
 use super::storage::{
-    append_session_messages_db_async, create_session_and_activate_db_async,
-    ensure_session_identity_v2_db_async, load_active_session_id_db_async, load_sessions_db_async,
+    clear_scoped_messages_async, count_scoped_messages_async, create_session_and_activate_db_async,
+    ensure_session_identity_v2_db_async, get_scoped_summary_async, get_user_memories_async,
+    load_active_session_id_db_async, load_scoped_messages_async, load_sessions_db_async,
     remove_session_transaction_db_async, replace_session_messages_if_revision_db_async,
-    save_session_metadata_db_async, switch_active_session_db_async,
+    save_scoped_message_async, save_scoped_summary_async, save_session_metadata_db_async,
+    save_user_memory_async, switch_active_session_db_async,
 };
 pub use super::storage::{
     load_app_setting, load_capability_registry, load_model_routing, load_provider_store,
     save_app_setting, save_provider_store, CapabilityKind, CapabilityRecord, CapabilityRegistry,
-    CapabilityState, ChatMessage, ChatSession, ProbeEvent, ProbeOutcome, ProviderConfig,
-    ProviderStore,
+    CapabilityState, ChatSession, ProbeEvent, ProbeOutcome, ProviderConfig, ProviderStore,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -720,6 +721,7 @@ fn max_output_tokens_for_model(model: &str) -> usize {
 type GenerationKey = (i64, i64);
 type GenerationCancelSender = watch::Sender<bool>;
 type ActiveGenerations = Arc<RwLock<HashMap<GenerationKey, GenerationCancelSender>>>;
+type GenerationLockMap = Arc<RwLock<HashMap<(i64, i64), Arc<Mutex<()>>>>>;
 
 pub struct GenerationInput<'a> {
     pub prompt: &'a str,
@@ -836,7 +838,7 @@ pub struct AIChatService {
     pub(super) client: Client,
     user_sessions: Arc<RwLock<HashMap<i64, Vec<ChatSession>>>>,
     active_session_id: Arc<RwLock<HashMap<i64, usize>>>,
-    generation_locks: Arc<RwLock<HashMap<i64, Arc<Mutex<()>>>>>,
+    generation_locks: GenerationLockMap,
     session_locks: Arc<RwLock<HashMap<i64, Arc<Mutex<()>>>>>,
     active_generations: ActiveGenerations,
     pub user_waiting_rename: Arc<RwLock<HashMap<i64, usize>>>,
@@ -917,8 +919,8 @@ impl AIChatService {
 
     async fn rehydrate_history_content(
         &self,
-        user_id: i64,
-        session_id: usize,
+        chat_id: i64,
+        thread_id: i64,
         value: &Value,
         snapshot: &GenerationModelSnapshot,
     ) -> Value {
@@ -939,7 +941,7 @@ impl AIChatService {
                 continue;
             }
 
-            let bytes = match load_attachment(user_id, session_id, &attachment).await {
+            let bytes = match load_attachment(chat_id, thread_id, &attachment).await {
                 Ok(bytes) => bytes,
                 Err(err) => {
                     warn!("Unable to reload persisted attachment: {err}");
@@ -1348,15 +1350,28 @@ impl AIChatService {
         }
     }
 
-    pub async fn generation_lock(&self, user_id: i64) -> Arc<Mutex<()>> {
-        if let Some(lock) = self.generation_locks.read().await.get(&user_id).cloned() {
+    pub async fn clear_scoped_history(&self, chat_id: i64, thread_id: i64) -> bool {
+        let cleared = clear_scoped_messages_async(chat_id, thread_id).await;
+        if cleared {
+            crate::attachments::delete_scoped_attachments(chat_id, thread_id).await;
+        }
+        cleared
+    }
+
+    pub async fn generation_lock(&self, chat_id: i64, thread_id: i64) -> Arc<Mutex<()>> {
+        let key = (chat_id, thread_id);
+        if let Some(lock) = self.generation_locks.read().await.get(&key).cloned() {
             return lock;
         }
         let mut locks = self.generation_locks.write().await;
         locks
-            .entry(user_id)
+            .entry(key)
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
+    }
+
+    pub async fn generation_lock_user(&self, user_id: i64) -> Arc<Mutex<()>> {
+        self.generation_lock(user_id, 0).await
     }
 
     pub async fn begin_generation(&self, chat_id: i64, draft_id: i64) -> watch::Receiver<bool> {
@@ -1399,16 +1414,16 @@ impl AIChatService {
     }
 
     pub async fn get_context_stats(&self, user_id: i64) -> ContextStats {
-        let active_sess = self
-            .get_active_session(user_id)
-            .await
-            .unwrap_or(ChatSession {
-                id: 0,
-                name: "Storage unavailable".to_string(),
-                messages: Vec::new(),
-                created_at: "-".to_string(),
-                revision: 0,
-            });
+        self.get_scoped_context_stats(user_id, 0, user_id).await
+    }
+
+    pub async fn get_scoped_context_stats(
+        &self,
+        chat_id: i64,
+        thread_id: i64,
+        user_id: i64,
+    ) -> ContextStats {
+        let scoped_messages = load_scoped_messages_async(chat_id, thread_id, 50).await;
         let active_model = self.get_user_model(user_id).await;
         let endpoint = self
             .get_active_provider(user_id)
@@ -1424,7 +1439,7 @@ impl AIChatService {
         let mut total_chars = 0;
         let mut msg_stats = Vec::new();
 
-        for (i, m) in active_sess.messages.iter().enumerate() {
+        for (i, m) in scoped_messages.iter().enumerate() {
             let c_str = match &m.content {
                 Value::String(s) => s.clone(),
                 value => decode_user_content(value)
@@ -1456,14 +1471,12 @@ impl AIChatService {
             });
         }
 
-        let attachment_count = active_sess
-            .messages
+        let attachment_count = scoped_messages
             .iter()
             .filter_map(|message| decode_user_content(&message.content))
             .map(|persisted| persisted.attachments.len())
             .sum();
-        let total_tokens = active_sess
-            .messages
+        let total_tokens = scoped_messages
             .iter()
             .map(|message| estimate_stored_content_tokens(&message.content))
             .sum();
@@ -1492,16 +1505,24 @@ impl AIChatService {
             "░".repeat(10 - filled_blocks)
         );
 
+        let session_name = if chat_id == user_id && thread_id == 0 {
+            "Main Conversation".to_string()
+        } else if thread_id != 0 {
+            format!("Topic #{thread_id}")
+        } else {
+            format!("Chat #{chat_id}")
+        };
+
         ContextStats {
-            session_name: active_sess.name,
-            session_id: active_sess.id,
-            created_at: active_sess.created_at,
+            session_name,
+            session_id: 0,
+            created_at: "Eternal".to_string(),
             model_name: active_model,
             capabilities: cap,
             limit_tokens,
             limit_str,
-            total_messages: active_sess.messages.len(),
-            total_turns: active_sess.messages.len().div_ceil(2),
+            total_messages: scoped_messages.len(),
+            total_turns: scoped_messages.len().div_ceil(2),
             attachment_count,
             total_tokens,
             output_reserve_tokens,
@@ -1714,17 +1735,23 @@ impl AIChatService {
 
     pub async fn generate_response(
         &self,
+        chat_id: i64,
+        thread_id: i64,
         user_id: i64,
         input: GenerationInput<'_>,
         cancel_rx: &mut watch::Receiver<bool>,
     ) -> (Option<String>, String, bool) {
         let snapshot = self.generation_model_snapshot().await;
-        self.generate_response_with_snapshot(user_id, input, &snapshot, cancel_rx)
-            .await
+        self.generate_response_with_snapshot(
+            chat_id, thread_id, user_id, input, &snapshot, cancel_rx,
+        )
+        .await
     }
 
     pub(crate) async fn generate_response_with_snapshot(
         &self,
+        chat_id: i64,
+        thread_id: i64,
         user_id: i64,
         input: GenerationInput<'_>,
         snapshot: &GenerationModelSnapshot,
@@ -1773,6 +1800,8 @@ impl AIChatService {
         let Some(role) = role else {
             return self
                 .generate_response_on_main(
+                    chat_id,
+                    thread_id,
                     user_id,
                     &main,
                     snapshot,
@@ -1826,6 +1855,8 @@ impl AIChatService {
             if audio_mode == AudioExecutionMode::Native {
                 return self
                     .generate_response_on_main(
+                        chat_id,
+                        thread_id,
                         user_id,
                         &main,
                         snapshot,
@@ -1880,6 +1911,8 @@ impl AIChatService {
             };
             return self
                 .generate_response_on_main(
+                    chat_id,
+                    thread_id,
                     user_id,
                     &main,
                     snapshot,
@@ -1907,6 +1940,8 @@ impl AIChatService {
         if same_as_main && specialist.route_origin == RouteOrigin::MainModel {
             return self
                 .generate_response_on_main(
+                    chat_id,
+                    thread_id,
                     user_id,
                     &main,
                     snapshot,
@@ -1963,6 +1998,8 @@ impl AIChatService {
             observation
         );
         self.generate_response_on_main(
+            chat_id,
+            thread_id,
             user_id,
             &main,
             snapshot,
@@ -1987,8 +2024,11 @@ impl AIChatService {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn generate_response_on_main(
         &self,
+        chat_id: i64,
+        thread_id: i64,
         user_id: i64,
         main_route: &ResolvedModelRoute,
         snapshot: &GenerationModelSnapshot,
@@ -2014,16 +2054,6 @@ impl AIChatService {
 
         let provider = &main_route.provider;
         let model = &main_route.model;
-
-        let Some(active_sess) = self.get_active_session(user_id).await else {
-            return (
-                None,
-                "Penyimpanan session sedang tidak tersedia. XiaoAI tidak akan membuat ID session sementara yang berisiko dipakai ulang. Coba lagi setelah storage pulih.".to_string(),
-                false,
-            );
-        };
-        let request_session_id = active_sess.id;
-        let request_session_revision = active_sess.revision;
 
         let mut clean_prompt = prompt.trim().to_string();
         if let Some(doc) = doc_text {
@@ -2088,9 +2118,10 @@ impl AIChatService {
             .context_limit
             .saturating_sub(reserved_tokens);
 
+        let scoped_messages = load_scoped_messages_async(chat_id, thread_id, 20).await;
         let mut selected_history = Vec::new();
         let mut used_history_tokens = 0usize;
-        for message in active_sess.messages.iter().rev().take(50) {
+        for message in scoped_messages.iter().rev() {
             let estimated = estimate_stored_content_tokens(&message.content).saturating_add(8);
             if !selected_history.is_empty()
                 && used_history_tokens.saturating_add(estimated) > history_budget
@@ -2101,47 +2132,58 @@ impl AIChatService {
                 continue;
             }
             used_history_tokens = used_history_tokens.saturating_add(estimated);
-            selected_history.push(message);
+            selected_history.push(message.clone());
         }
         selected_history.reverse();
 
         let mut history = Vec::with_capacity(selected_history.len());
-        for message in selected_history {
+        for message in &selected_history {
             let content = if message.role == "user" {
-                self.rehydrate_history_content(
-                    user_id,
-                    request_session_id,
-                    &message.content,
-                    snapshot,
-                )
-                .await
+                self.rehydrate_history_content(chat_id, thread_id, &message.content, snapshot)
+                    .await
             } else {
                 message.content.clone()
             };
             history.push(json!({ "role": message.role, "content": content }));
         }
 
+        let user_memories = get_user_memories_async(user_id).await;
+        let mut system_text = "Kamu adalah Xiao, asisten AI yang cerdas, komunikatif, dan ramah. \
+                    Gunakan input multimodal hanya ketika input tersebut benar-benar disediakan dan endpoint/model mendukungnya. \
+                    Dokumen Xiao diekstrak menjadi teks bila memungkinkan; PDF scan dapat diberikan sebagai halaman hasil render untuk OCR visual. \
+                    Lakukan penalaran secara internal dan berikan hanya jawaban yang berguna bagi pengguna; jangan menampilkan chain-of-thought tersembunyi. \
+                    Gunakan gaya bahasa yang alami dan format teks yang elegan. \
+                    Jika membuat tabel atau data berkolom, gunakan Markdown Table standar agar Xiao dapat merendernya secara rapi. \
+                    Jika menyajikan visual atau media publik yang relevan, letakkan format blok media pada baris tersendiri:\n\
+                    - Foto Tunggal: [photo: Judul](https://url-gambar-langsung) atau ![Judul](https://url-gambar-langsung)\n\
+                    - Galeri/Kolase Foto (2+ foto): [collage: Judul](https://url-1, https://url-2) atau [kolase: Judul](url1, url2)\n\
+                    - Slide Foto: [slideshow: Judul](https://url-1, https://url-2)\n\
+                    - Format tag Telegram native juga didukung: <tg-photo src=\"...\" caption=\"...\"/>, <tg-collage caption=\"...\">...</tg-collage>, <tg-slideshow caption=\"...\">...</tg-slideshow>, <tg-video src=\"...\" caption=\"...\"/>, <tg-audio src=\"...\" caption=\"...\"/>\n\
+                    - Gambar langsung harus URL file raster publik (.jpg, .jpeg, .png, .webp). Hindari hotlink langsung Wikimedia/Wikipedia yang sering memblokir bot (HTTP 403) dan jangan gunakan format vektor .svg untuk foto.\n\
+                    - Audio/Musik: [audio: Judul Lagu](https://url-audio)\n\
+                    - Rekaman Suara: [voice: Catatan Suara](https://url-audio)\n\
+                    - Video Langsung (.mp4): [video: Judul Video](https://url-video.mp4)\n\
+                    - Video Streaming Web (YouTube, Vimeo, Twitch): gunakan tautan teks standar [Judul Video](https://youtube.com/...) agar Telegram otomatis memunculkan rich link preview interaktif.\n\
+                    - Peta/Lokasi: [map: latitude, longitude]\n\
+                    - Dokumen: [document: Nama Dokumen](https://url-dokumen)\n\
+                    Jangan pernah menampilkan tag internal seperti <think>, <thought>, <tool_call>, atau blok JSON raw ke pengguna.".to_string();
+
+        if !user_memories.is_empty() {
+            system_text.push_str("\n\n[User Profile (Long-Term Memory)]:\n");
+            for (key, fact) in &user_memories {
+                system_text.push_str(&format!("- {key}: {fact}\n"));
+            }
+        }
+
+        if let Some(summary) = get_scoped_summary_async(chat_id, thread_id).await {
+            system_text.push_str(&format!(
+                "\n\n[Previous Conversation Summary for this Topic]:\n{summary}\n"
+            ));
+        }
+
         let mut messages = vec![json!({
             "role": "system",
-            "content": "Kamu adalah asisten AI yang cerdas, komunikatif, dan ramah. \
-                        Gunakan input multimodal hanya ketika input tersebut benar-benar disediakan dan endpoint/model mendukungnya. \
-                        Dokumen Xiao diekstrak menjadi teks bila memungkinkan; PDF scan dapat diberikan sebagai halaman hasil render untuk OCR visual. \
-                        Lakukan penalaran secara internal dan berikan hanya jawaban yang berguna bagi pengguna; jangan menampilkan chain-of-thought tersembunyi. \
-                        Gunakan gaya bahasa yang alami dan format teks yang elegan. \
-                        Jika membuat tabel atau data berkolom, gunakan Markdown Table standar agar Xiao dapat merendernya secara rapi. \
-                        Jika menyajikan visual atau media publik yang relevan, letakkan format blok media pada baris tersendiri:\n\
-                        - Foto Tunggal: [photo: Judul](https://url-gambar-langsung) atau ![Judul](https://url-gambar-langsung)\n\
-                        - Galeri/Kolase Foto (2+ foto): [collage: Judul](https://url-1, https://url-2) atau [kolase: Judul](url1, url2)\n\
-                        - Slide Foto: [slideshow: Judul](https://url-1, https://url-2)\n\
-                        - Format tag Telegram native juga didukung: <tg-photo src=\"...\" caption=\"...\"/>, <tg-collage caption=\"...\">...</tg-collage>, <tg-slideshow caption=\"...\">...</tg-slideshow>, <tg-video src=\"...\" caption=\"...\"/>, <tg-audio src=\"...\" caption=\"...\"/>\n\
-                        - Gambar langsung harus URL file raster publik (.jpg, .jpeg, .png, .webp). Hindari hotlink langsung Wikimedia/Wikipedia yang sering memblokir bot (HTTP 403) dan jangan gunakan format vektor .svg untuk foto.\n\
-                        - Audio/Musik: [audio: Judul Lagu](https://url-audio)\n\
-                        - Rekaman Suara: [voice: Catatan Suara](https://url-audio)\n\
-                        - Video Langsung (.mp4): [video: Judul Video](https://url-video.mp4)\n\
-                        - Video Streaming Web (YouTube, Vimeo, Twitch): gunakan tautan teks standar [Judul Video](https://youtube.com/...) agar Telegram otomatis memunculkan rich link preview interaktif.\n\
-                        - Peta/Lokasi: [map: latitude, longitude]\n\
-                        - Dokumen: [document: Nama Dokumen](https://url-dokumen)\n\
-                        Jangan pernah menampilkan tag internal seperti <think>, <thought>, <tool_call>, atau blok JSON raw ke pengguna."
+            "content": system_text
         })];
 
         messages.extend(history);
@@ -2782,37 +2824,9 @@ impl AIChatService {
             return (thinking_text, answer_text, cancelled);
         }
 
-        // Persist only to the exact session revision that originated this request.
-        // All destructive session mutations share this lock and bump the durable
-        // revision before publishing RAM, so a late pre-clear generation cannot
-        // reappear after /clear or a session replacement.
-        let session_lock = self.session_lock(user_id).await;
-        let _session_guard = session_lock.lock().await;
-        let current_session = {
-            let sessions_map = self.user_sessions.read().await;
-            sessions_map.get(&user_id).and_then(|list| {
-                list.iter()
-                    .find(|session| session.id == request_session_id)
-                    .cloned()
-            })
-        };
-        if !generation_revision_matches(
-            current_session.as_ref(),
-            request_session_id,
-            request_session_revision,
-        ) {
-            warn!(
-                "Discarding late AI result for deleted or stale session {request_session_id} revision {request_session_revision}"
-            );
-            return (thinking_text, answer_text, cancelled);
-        }
-        let Some(mut candidate_session) = current_session else {
-            return (thinking_text, answer_text, cancelled);
-        };
-
         // Multimodal attachments are stored outside SQLite and referenced from
-        // the user message. If the SQLite append fails, only the newly created
-        // references are removed; pre-existing session attachments stay intact.
+        // the user message. If the append fails, only newly created references
+        // are cleaned up; pre-existing media stays intact.
         let mut attachment_refs = Vec::new();
         if let Some(pages) = document_images.as_ref() {
             for (index, page) in pages.iter().enumerate() {
@@ -2822,8 +2836,8 @@ impl AIChatService {
                     index.saturating_add(1)
                 );
                 match persist_attachment(
-                    user_id,
-                    request_session_id,
+                    chat_id,
+                    thread_id,
                     "document_page",
                     "image/png",
                     Some(&page_name),
@@ -2839,8 +2853,8 @@ impl AIChatService {
             match resolved_runtime_media_mime(mime_type, "image/", "persisted image") {
                 Ok(resolved_mime) => {
                     match persist_attachment(
-                        user_id,
-                        request_session_id,
+                        chat_id,
+                        thread_id,
                         "image",
                         &resolved_mime,
                         None,
@@ -2856,15 +2870,8 @@ impl AIChatService {
             }
         } else if let Some(bytes) = audio_bytes.as_ref() {
             let resolved_mime = resolved_audio_persistence_mime(audio_mime, doc_name);
-            match persist_attachment(
-                user_id,
-                request_session_id,
-                "audio",
-                &resolved_mime,
-                doc_name,
-                bytes,
-            )
-            .await
+            match persist_attachment(chat_id, thread_id, "audio", &resolved_mime, doc_name, bytes)
+                .await
             {
                 Ok(reference) => attachment_refs.push(reference),
                 Err(err) => warn!("Failed to persist audio attachment: {err}"),
@@ -2873,8 +2880,8 @@ impl AIChatService {
             match resolved_runtime_media_mime(video_mime, "video/", "persisted video") {
                 Ok(resolved_mime) => {
                     match persist_attachment(
-                        user_id,
-                        request_session_id,
+                        chat_id,
+                        thread_id,
                         "video",
                         &resolved_mime,
                         None,
@@ -2890,69 +2897,265 @@ impl AIChatService {
             }
         }
 
-        let user_message = ChatMessage {
-            role: "user".to_string(),
-            content: encode_user_content(
-                canonical_persisted_prompt(canonical_history_prompt.as_deref(), &clean_prompt),
-                attachment_refs.clone(),
-            ),
-        };
-        let assistant_message = ChatMessage {
-            role: "assistant".to_string(),
-            content: Value::String(answer_text.clone()),
-        };
-        let appended = vec![user_message, assistant_message];
-        if candidate_session.messages.is_empty() && candidate_session.name.starts_with("Session ") {
-            let title_source =
-                canonical_persisted_prompt(canonical_history_prompt.as_deref(), &clean_prompt);
-            let clean_title = title_source.trim().replace('\n', " ");
-            let short_title = truncate_chars_with_ellipsis(&clean_title, 32);
-            if !short_title.is_empty() {
-                candidate_session.name = short_title;
-            }
-        }
-        candidate_session.messages.extend(appended.iter().cloned());
+        let user_message_content = encode_user_content(
+            canonical_persisted_prompt(canonical_history_prompt.as_deref(), &clean_prompt),
+            attachment_refs.clone(),
+        );
+        let user_content_str = serde_json::to_string(&user_message_content).unwrap_or_default();
+        let assistant_content_str = answer_text.clone();
 
-        match append_session_messages_db_async(
+        save_scoped_message_async(
+            chat_id,
+            thread_id,
             user_id,
-            request_session_revision,
-            candidate_session.clone(),
-            appended,
+            "user".to_string(),
+            user_content_str,
         )
-        .await
-        {
-            Some(true) => {
-                let mut sessions_map = self.user_sessions.write().await;
-                if let Some(session) = sessions_map.get_mut(&user_id).and_then(|list| {
-                    list.iter_mut().find(|session| {
-                        session.id == request_session_id
-                            && session.revision == request_session_revision
-                    })
-                }) {
-                    *session = candidate_session;
-                } else {
-                    // The shared session lock makes this unreachable for normal
-                    // in-process mutations. Evict instead of inventing a RAM-only
-                    // canonical state if an external DB writer changed identity.
-                    sessions_map.remove(&user_id);
-                    warn!("Session cache changed after durable append; evicted RAM cache");
-                }
-            }
-            Some(false) => {
-                delete_attachment_refs(user_id, request_session_id, &attachment_refs).await;
-                warn!(
-                    "Discarding AI history append because session {request_session_id} revision changed before commit"
-                );
-            }
-            None => {
-                delete_attachment_refs(user_id, request_session_id, &attachment_refs).await;
-                warn!(
-                    "AI answer was generated but canonical history persistence failed for session {request_session_id}"
-                );
-            }
-        }
+        .await;
+        save_scoped_message_async(
+            chat_id,
+            thread_id,
+            user_id,
+            "assistant".to_string(),
+            assistant_content_str,
+        )
+        .await;
+
+        let service_clone = self.clone();
+        let main_provider = provider.clone();
+        let main_model = model.clone();
+        let prompt_for_bg = clean_prompt.clone();
+        let answer_for_bg = answer_text.clone();
+        tokio::spawn(async move {
+            service_clone
+                .process_background_memory_turn(
+                    user_id,
+                    chat_id,
+                    thread_id,
+                    &main_provider,
+                    &main_model,
+                    &prompt_for_bg,
+                    &answer_for_bg,
+                )
+                .await;
+        });
 
         (thinking_text, answer_text, cancelled)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn process_background_memory_turn(
+        &self,
+        user_id: i64,
+        chat_id: i64,
+        thread_id: i64,
+        provider: &ProviderConfig,
+        model: &str,
+        user_prompt: &str,
+        assistant_answer: &str,
+    ) {
+        let total_count = count_scoped_messages_async(chat_id, thread_id).await;
+
+        let text_lower = user_prompt.to_ascii_lowercase();
+        let personal_hints = [
+            "nama saya",
+            "namaku",
+            "my name",
+            "saya suka",
+            "prefer",
+            "tech stack",
+            "proyek",
+            "project",
+            "bekerja sebagai",
+            "tinggal di",
+            "bahasa",
+            "panggil aku",
+            "i am",
+            "i work",
+            "i live",
+            "my favorite",
+            "hobi",
+        ];
+        let has_hint = personal_hints.iter().any(|hint| text_lower.contains(hint));
+        let has_significant_data = has_hint || user_prompt.chars().count() > 80;
+        let should_extract = has_significant_data || total_count <= 6 || (total_count % 6 == 0);
+
+        if should_extract {
+            self.extract_user_facts_background(
+                user_id,
+                provider,
+                model,
+                user_prompt,
+                assistant_answer,
+            )
+            .await;
+        }
+
+        if total_count > 20 && (total_count % 20 == 0) {
+            self.summarize_older_history_background(user_id, chat_id, thread_id, provider, model)
+                .await;
+        }
+    }
+
+    async fn extract_user_facts_background(
+        &self,
+        user_id: i64,
+        provider: &ProviderConfig,
+        model: &str,
+        user_prompt: &str,
+        assistant_answer: &str,
+    ) {
+        let url = provider_url(&provider.endpoint, "chat/completions");
+        let extract_prompt = format!(
+            "User input: \"{}\"\nAssistant reply: \"{}\"\n\n\
+            Analyze the user input and extract persistent personal profile facts about the user \
+            (e.g., Name/Callsign, Preferred Language, Tech Stack, Ongoing Projects, Key Preferences, Style, Role/Work). \
+            Respond ONLY with a valid JSON array of objects with \"key\" and \"fact\" properties. \
+            Example: [{{\"key\": \"Name\", \"fact\": \"Alex\"}}, {{\"key\": \"Tech Stack\", \"fact\": \"Rust, Linux, Termux\"}}]. \
+            If there are no personal facts about the user in the input, return an empty array []. \
+            Do not output any markdown formatting, thoughts, or explanations, only the raw JSON array.",
+            truncate_chars(user_prompt, 800),
+            truncate_chars(assistant_answer, 400),
+        );
+
+        let payload = json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "You are a concise background fact extraction engine. Always output only valid JSON without code fences or extra text."
+                },
+                {
+                    "role": "user",
+                    "content": extract_prompt
+                }
+            ],
+            "temperature": 0.1,
+            "max_tokens": 400,
+            "stream": false
+        });
+
+        let mut req = self.client.post(&url).json(&payload);
+        if !provider.api_key.is_empty()
+            && !["none", "-", "no"]
+                .iter()
+                .any(|k| provider.api_key.eq_ignore_ascii_case(k))
+        {
+            req = req.bearer_auth(&provider.api_key);
+        }
+
+        let resp = match req.timeout(Duration::from_secs(30)).send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => return,
+        };
+
+        let body = match resp.json::<Value>().await {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+
+        let content = body
+            .get("choices")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("message"))
+            .and_then(|m| m.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim();
+
+        let clean_json = if let Some(stripped) = content.strip_prefix("```json") {
+            stripped.trim_end_matches("```").trim()
+        } else if let Some(stripped) = content.strip_prefix("```") {
+            stripped.trim_end_matches("```").trim()
+        } else {
+            content
+        };
+
+        #[derive(Deserialize)]
+        struct ExtractedFact {
+            key: String,
+            fact: String,
+        }
+
+        if let Ok(facts) = serde_json::from_str::<Vec<ExtractedFact>>(clean_json) {
+            for f in facts {
+                let k = f.key.trim().to_string();
+                let v = f.fact.trim().to_string();
+                if !k.is_empty() && !v.is_empty() && k.len() <= 64 && v.len() <= 500 {
+                    save_user_memory_async(user_id, k, v).await;
+                }
+            }
+        }
+    }
+
+    async fn summarize_older_history_background(
+        &self,
+        user_id: i64,
+        chat_id: i64,
+        thread_id: i64,
+        provider: &ProviderConfig,
+        model: &str,
+    ) {
+        let messages = load_scoped_messages_async(chat_id, thread_id, 30).await;
+        if messages.len() < 10 {
+            return;
+        }
+        let mut turns_text = String::new();
+        for m in &messages[..messages.len().saturating_sub(10)] {
+            let preview = match &m.content {
+                Value::String(s) => s.as_str(),
+                val => val.as_str().unwrap_or(""),
+            };
+            turns_text.push_str(&format!("{}: {}\n", m.role, truncate_chars(preview, 200)));
+        }
+        let url = provider_url(&provider.endpoint, "chat/completions");
+        let summary_prompt = format!(
+            "Past conversation history:\n{}\n\nSummarize the ongoing context, key discussions, and decisions in 2-3 concise sentences. Output only the plain summary.",
+            truncate_chars(&turns_text, 3000)
+        );
+        let payload = json!({
+            "model": model,
+            "messages": [
+                { "role": "system", "content": "You are a concise conversational summarizer." },
+                { "role": "user", "content": summary_prompt }
+            ],
+            "temperature": 0.2,
+            "max_tokens": 250,
+            "stream": false
+        });
+        let mut req = self.client.post(&url).json(&payload);
+        if !provider.api_key.is_empty()
+            && !["none", "-", "no"]
+                .iter()
+                .any(|k| provider.api_key.eq_ignore_ascii_case(k))
+        {
+            req = req.bearer_auth(&provider.api_key);
+        }
+        if let Ok(resp) = req.timeout(Duration::from_secs(30)).send().await {
+            if let Ok(body) = resp.json::<Value>().await {
+                if let Some(summary) = body
+                    .get("choices")
+                    .and_then(|c| c.get(0))
+                    .and_then(|c| c.get("message"))
+                    .and_then(|m| m.get("content"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    save_scoped_summary_async(chat_id, thread_id, summary.to_string()).await;
+
+                    // Also extract any lingering user profile facts from older turns into Tier 1
+                    self.extract_user_facts_background(
+                        user_id,
+                        provider,
+                        model,
+                        &turns_text,
+                        summary,
+                    )
+                    .await;
+                }
+            }
+        }
     }
 
     // ==========================================

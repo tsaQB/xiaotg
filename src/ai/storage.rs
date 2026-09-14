@@ -1,5 +1,5 @@
 use chrono::Local;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -503,8 +503,9 @@ fn open_session_db() -> rusqlite::Result<Connection> {
             PRIMARY KEY(user_id, session_id)
         );
         CREATE TABLE IF NOT EXISTS messages (
-            user_id INTEGER NOT NULL, session_id INTEGER NOT NULL, role TEXT NOT NULL,
-            content TEXT NOT NULL, created_at TEXT NOT NULL
+            user_id INTEGER NOT NULL, session_id INTEGER NOT NULL DEFAULT 0,
+            chat_id INTEGER NOT NULL DEFAULT 0, thread_id INTEGER NOT NULL DEFAULT 0,
+            role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS active_sessions (
             user_id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL
@@ -523,7 +524,22 @@ fn open_session_db() -> rusqlite::Result<Connection> {
             received_at TEXT NOT NULL,
             last_error TEXT
         );
+        CREATE TABLE IF NOT EXISTS user_memories (
+            user_id INTEGER NOT NULL,
+            key TEXT NOT NULL,
+            fact TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, key)
+        );
+        CREATE TABLE IF NOT EXISTS scoped_summaries (
+            chat_id INTEGER NOT NULL,
+            thread_id INTEGER NOT NULL DEFAULT 0,
+            summary TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(chat_id, thread_id)
+        );
         CREATE INDEX IF NOT EXISTS idx_messages_user_session ON messages(user_id, session_id);
+        CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id);
         CREATE INDEX IF NOT EXISTS idx_telegram_inbox_status_update_id ON telegram_inbox(status, update_id);",
     )?;
     ensure_column(
@@ -531,6 +547,25 @@ fn open_session_db() -> rusqlite::Result<Connection> {
         "sessions",
         "revision",
         "ALTER TABLE sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    ensure_column(
+        &conn,
+        "messages",
+        "chat_id",
+        "ALTER TABLE messages ADD COLUMN chat_id INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    ensure_column(
+        &conn,
+        "messages",
+        "thread_id",
+        "ALTER TABLE messages ADD COLUMN thread_id INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    let _ = conn.execute(
+        "UPDATE messages SET chat_id = user_id WHERE chat_id = 0 AND user_id != 0;",
+        [],
+    );
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_messages_chat_thread ON messages(chat_id, thread_id);",
     )?;
     // WAL/SHM files may be created lazily. The private 0700 parent directory
     // is the primary boundary; harden sidecars whenever they already exist.
@@ -675,16 +710,7 @@ fn replace_session_messages_if_revision_on_conn(
     Ok(true)
 }
 
-fn append_session_messages_db(
-    user_id: i64,
-    expected_revision: u64,
-    session: &ChatSession,
-    messages: &[ChatMessage],
-) -> rusqlite::Result<bool> {
-    let mut conn = open_session_db()?;
-    append_session_messages_on_conn(&mut conn, user_id, expected_revision, session, messages)
-}
-
+#[cfg(test)]
 fn append_session_messages_on_conn(
     conn: &mut Connection,
     user_id: i64,
@@ -1162,18 +1188,6 @@ pub(super) async fn replace_session_messages_if_revision_db_async(
     .await
 }
 
-pub(super) async fn append_session_messages_db_async(
-    user_id: i64,
-    expected_revision: u64,
-    session: ChatSession,
-    messages: Vec<ChatMessage>,
-) -> Option<bool> {
-    run_db("append_session_messages", move || {
-        append_session_messages_db(user_id, expected_revision, &session, &messages)
-    })
-    .await
-}
-
 pub(super) async fn switch_active_session_db_async(
     user_id: i64,
     session_id: usize,
@@ -1233,6 +1247,284 @@ pub(super) async fn load_active_session_id_db_async(user_id: i64) -> Option<usiz
         )
     })
     .await
+}
+
+pub fn load_scoped_messages(
+    chat_id: i64,
+    thread_id: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<ChatMessage>> {
+    let conn = open_session_db()?;
+    load_scoped_messages_on_conn(&conn, chat_id, thread_id, limit)
+}
+
+fn load_scoped_messages_on_conn(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+    limit: usize,
+) -> rusqlite::Result<Vec<ChatMessage>> {
+    let mut stmt = conn.prepare(
+        "SELECT role, content FROM (
+            SELECT rowid, role, content FROM messages
+            WHERE chat_id = ?1 AND thread_id = ?2
+            ORDER BY rowid DESC
+            LIMIT ?3
+        ) ORDER BY rowid ASC",
+    )?;
+    let rows = stmt.query_map(params![chat_id, thread_id, limit as i64], |row| {
+        let role: String = row.get(0)?;
+        let content: String = row.get(1)?;
+        let content_val = serde_json::from_str(&content).unwrap_or(Value::String(content));
+        Ok(ChatMessage {
+            role,
+            content: content_val,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn count_scoped_messages(chat_id: i64, thread_id: i64) -> rusqlite::Result<usize> {
+    let conn = open_session_db()?;
+    count_scoped_messages_on_conn(&conn, chat_id, thread_id)
+}
+
+fn count_scoped_messages_on_conn(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+) -> rusqlite::Result<usize> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE chat_id = ?1 AND thread_id = ?2",
+        params![chat_id, thread_id],
+        |row| row.get(0),
+    )
+}
+
+pub fn save_scoped_message(
+    chat_id: i64,
+    thread_id: i64,
+    user_id: i64,
+    role: &str,
+    content: &str,
+) -> rusqlite::Result<()> {
+    let conn = open_session_db()?;
+    save_scoped_message_on_conn(&conn, chat_id, thread_id, user_id, role, content)
+}
+
+fn save_scoped_message_on_conn(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+    user_id: i64,
+    role: &str,
+    content: &str,
+) -> rusqlite::Result<()> {
+    let now = Local::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO messages(user_id, session_id, chat_id, thread_id, role, content, created_at)
+         VALUES(?1, 0, ?2, ?3, ?4, ?5, ?6)",
+        params![user_id, chat_id, thread_id, role, content, now],
+    )?;
+    Ok(())
+}
+
+pub fn get_user_memories(user_id: i64) -> rusqlite::Result<Vec<(String, String)>> {
+    let conn = open_session_db()?;
+    get_user_memories_on_conn(&conn, user_id)
+}
+
+fn get_user_memories_on_conn(
+    conn: &Connection,
+    user_id: i64,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt =
+        conn.prepare("SELECT key, fact FROM user_memories WHERE user_id = ?1 ORDER BY key ASC")?;
+    let rows = stmt.query_map(params![user_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+    rows.collect()
+}
+
+pub fn save_user_memory(user_id: i64, key: &str, fact: &str) -> rusqlite::Result<()> {
+    let conn = open_session_db()?;
+    save_user_memory_on_conn(&conn, user_id, key, fact)
+}
+
+fn save_user_memory_on_conn(
+    conn: &Connection,
+    user_id: i64,
+    key: &str,
+    fact: &str,
+) -> rusqlite::Result<()> {
+    let now = Local::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO user_memories(user_id, key, fact, updated_at) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(user_id, key) DO UPDATE SET fact = excluded.fact, updated_at = excluded.updated_at",
+        params![user_id, key, fact, now],
+    )?;
+    Ok(())
+}
+
+pub fn delete_user_memory(user_id: i64, key: &str) -> rusqlite::Result<()> {
+    let conn = open_session_db()?;
+    delete_user_memory_on_conn(&conn, user_id, key)
+}
+
+fn delete_user_memory_on_conn(conn: &Connection, user_id: i64, key: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM user_memories WHERE user_id = ?1 AND key = ?2",
+        params![user_id, key],
+    )?;
+    Ok(())
+}
+
+pub fn clear_user_memories(user_id: i64) -> rusqlite::Result<()> {
+    let conn = open_session_db()?;
+    clear_user_memories_on_conn(&conn, user_id)
+}
+
+fn clear_user_memories_on_conn(conn: &Connection, user_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM user_memories WHERE user_id = ?1",
+        params![user_id],
+    )?;
+    Ok(())
+}
+
+pub async fn load_scoped_messages_async(
+    chat_id: i64,
+    thread_id: i64,
+    limit: usize,
+) -> Vec<ChatMessage> {
+    run_db("load_scoped_messages", move || {
+        load_scoped_messages(chat_id, thread_id, limit)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+pub async fn count_scoped_messages_async(chat_id: i64, thread_id: i64) -> usize {
+    run_db("count_scoped_messages", move || {
+        count_scoped_messages(chat_id, thread_id)
+    })
+    .await
+    .unwrap_or_default()
+}
+
+pub async fn save_scoped_message_async(
+    chat_id: i64,
+    thread_id: i64,
+    user_id: i64,
+    role: String,
+    content: String,
+) -> bool {
+    run_db("save_scoped_message", move || {
+        save_scoped_message(chat_id, thread_id, user_id, &role, &content)
+    })
+    .await
+    .is_some()
+}
+
+pub async fn get_user_memories_async(user_id: i64) -> Vec<(String, String)> {
+    run_db("get_user_memories", move || get_user_memories(user_id))
+        .await
+        .unwrap_or_default()
+}
+
+pub async fn save_user_memory_async(user_id: i64, key: String, fact: String) -> bool {
+    run_db("save_user_memory", move || {
+        save_user_memory(user_id, &key, &fact)
+    })
+    .await
+    .is_some()
+}
+
+pub async fn delete_user_memory_async(user_id: i64, key: String) -> bool {
+    run_db("delete_user_memory", move || {
+        delete_user_memory(user_id, &key)
+    })
+    .await
+    .is_some()
+}
+
+pub async fn clear_user_memories_async(user_id: i64) -> bool {
+    run_db("clear_user_memories", move || clear_user_memories(user_id))
+        .await
+        .is_some()
+}
+
+pub fn clear_scoped_messages(chat_id: i64, thread_id: i64) -> rusqlite::Result<()> {
+    let conn = open_session_db()?;
+    conn.execute(
+        "DELETE FROM messages WHERE chat_id=?1 AND thread_id=?2",
+        params![chat_id, thread_id],
+    )?;
+    conn.execute(
+        "DELETE FROM scoped_summaries WHERE chat_id=?1 AND thread_id=?2",
+        params![chat_id, thread_id],
+    )?;
+    Ok(())
+}
+
+pub async fn clear_scoped_messages_async(chat_id: i64, thread_id: i64) -> bool {
+    run_db("clear_scoped_messages", move || {
+        clear_scoped_messages(chat_id, thread_id)
+    })
+    .await
+    .is_some()
+}
+
+pub fn get_scoped_summary(chat_id: i64, thread_id: i64) -> rusqlite::Result<Option<String>> {
+    let conn = open_session_db()?;
+    get_scoped_summary_on_conn(&conn, chat_id, thread_id)
+}
+
+fn get_scoped_summary_on_conn(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT summary FROM scoped_summaries WHERE chat_id=?1 AND thread_id=?2",
+        params![chat_id, thread_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn save_scoped_summary(chat_id: i64, thread_id: i64, summary: &str) -> rusqlite::Result<()> {
+    let conn = open_session_db()?;
+    save_scoped_summary_on_conn(&conn, chat_id, thread_id, summary)
+}
+
+fn save_scoped_summary_on_conn(
+    conn: &Connection,
+    chat_id: i64,
+    thread_id: i64,
+    summary: &str,
+) -> rusqlite::Result<()> {
+    let now = Local::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO scoped_summaries(chat_id, thread_id, summary, updated_at) VALUES(?1, ?2, ?3, ?4)
+         ON CONFLICT(chat_id, thread_id) DO UPDATE SET summary=excluded.summary, updated_at=excluded.updated_at",
+        params![chat_id, thread_id, summary, now],
+    )?;
+    Ok(())
+}
+
+pub async fn get_scoped_summary_async(chat_id: i64, thread_id: i64) -> Option<String> {
+    run_db("get_scoped_summary", move || {
+        get_scoped_summary(chat_id, thread_id)
+    })
+    .await
+    .flatten()
+}
+
+pub async fn save_scoped_summary_async(chat_id: i64, thread_id: i64, summary: String) -> bool {
+    run_db("save_scoped_summary", move || {
+        save_scoped_summary(chat_id, thread_id, &summary)
+    })
+    .await
+    .is_some()
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -1838,8 +2130,9 @@ mod tests {
                 PRIMARY KEY(user_id, session_id)
             );
             CREATE TABLE messages (
-                user_id INTEGER NOT NULL, session_id INTEGER NOT NULL, role TEXT NOT NULL,
-                content TEXT NOT NULL, created_at TEXT NOT NULL
+                user_id INTEGER NOT NULL, session_id INTEGER NOT NULL DEFAULT 0,
+                chat_id INTEGER NOT NULL DEFAULT 0, thread_id INTEGER NOT NULL DEFAULT 0,
+                role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL
             );
             CREATE TABLE active_sessions (user_id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL);
             CREATE TABLE session_counters (user_id INTEGER PRIMARY KEY, next_session_id INTEGER NOT NULL);
@@ -1847,7 +2140,23 @@ mod tests {
             CREATE TABLE telegram_inbox (
                 update_id INTEGER PRIMARY KEY, payload_json TEXT NOT NULL, status TEXT NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0, received_at TEXT NOT NULL, last_error TEXT
-            );",
+            );
+            CREATE TABLE user_memories (
+                user_id INTEGER NOT NULL,
+                key TEXT NOT NULL,
+                fact TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, key)
+            );
+            CREATE TABLE scoped_summaries (
+                chat_id INTEGER NOT NULL,
+                thread_id INTEGER NOT NULL DEFAULT 0,
+                summary TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY(chat_id, thread_id)
+            );
+            CREATE INDEX idx_messages_chat_thread ON messages(chat_id, thread_id);
+            CREATE INDEX idx_user_memories_user ON user_memories(user_id);",
         )
         .unwrap();
         conn
@@ -2570,6 +2879,106 @@ mod tests {
         assert_eq!(
             config.route(crate::ai::routing::ModelRole::AudioStt),
             Some(&crate::ai::routing::ModelRoute::MainModel)
+        );
+    }
+
+    #[test]
+    fn test_scoped_messages_and_threads() {
+        let conn = session_test_conn();
+        // Chat 100, Thread 0 (private chat)
+        save_scoped_message_on_conn(&conn, 100, 0, 100, "user", "\"Halo!\"").unwrap();
+        save_scoped_message_on_conn(&conn, 100, 0, 100, "assistant", "\"Hai ada apa?\"").unwrap();
+        // Supergroup -100123, Thread 42
+        save_scoped_message_on_conn(&conn, -100123, 42, 100, "user", "\"Topik 42\"").unwrap();
+        // Supergroup -100123, Thread 99
+        save_scoped_message_on_conn(&conn, -100123, 99, 100, "user", "\"Topik 99\"").unwrap();
+
+        assert_eq!(count_scoped_messages_on_conn(&conn, 100, 0).unwrap(), 2);
+        assert_eq!(
+            count_scoped_messages_on_conn(&conn, -100123, 42).unwrap(),
+            1
+        );
+        assert_eq!(
+            count_scoped_messages_on_conn(&conn, -100123, 99).unwrap(),
+            1
+        );
+
+        let msgs = load_scoped_messages_on_conn(&conn, 100, 0, 10).unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0].role, "user");
+        assert_eq!(msgs[0].content, Value::String("Halo!".to_string()));
+        assert_eq!(msgs[1].role, "assistant");
+        assert_eq!(msgs[1].content, Value::String("Hai ada apa?".to_string()));
+
+        let thread_msgs = load_scoped_messages_on_conn(&conn, -100123, 42, 10).unwrap();
+        assert_eq!(thread_msgs.len(), 1);
+        assert_eq!(
+            thread_msgs[0].content,
+            Value::String("Topik 42".to_string())
+        );
+    }
+
+    #[test]
+    fn test_user_memories_crud() {
+        let conn = session_test_conn();
+        let user_id = 999;
+        assert!(get_user_memories_on_conn(&conn, user_id)
+            .unwrap()
+            .is_empty());
+
+        save_user_memory_on_conn(&conn, user_id, "Name", "Alice").unwrap();
+        save_user_memory_on_conn(&conn, user_id, "Language", "Rust").unwrap();
+
+        let memories = get_user_memories_on_conn(&conn, user_id).unwrap();
+        assert_eq!(memories.len(), 2);
+        assert_eq!(memories[0], ("Language".to_string(), "Rust".to_string()));
+        assert_eq!(memories[1], ("Name".to_string(), "Alice".to_string()));
+
+        // Upsert
+        save_user_memory_on_conn(&conn, user_id, "Language", "Rust & Go").unwrap();
+        let memories = get_user_memories_on_conn(&conn, user_id).unwrap();
+        assert_eq!(memories.len(), 2);
+        assert_eq!(
+            memories[0],
+            ("Language".to_string(), "Rust & Go".to_string())
+        );
+
+        // Delete single
+        delete_user_memory_on_conn(&conn, user_id, "Language").unwrap();
+        let memories = get_user_memories_on_conn(&conn, user_id).unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0], ("Name".to_string(), "Alice".to_string()));
+
+        // Clear all
+        clear_user_memories_on_conn(&conn, user_id).unwrap();
+        let memories = get_user_memories_on_conn(&conn, user_id).unwrap();
+        assert!(memories.is_empty());
+    }
+
+    #[test]
+    fn test_scoped_summary_crud() {
+        let conn = session_test_conn();
+        assert_eq!(get_scoped_summary_on_conn(&conn, 100, 0).unwrap(), None);
+
+        save_scoped_summary_on_conn(&conn, 100, 0, "Discussed Rust async patterns").unwrap();
+        assert_eq!(
+            get_scoped_summary_on_conn(&conn, 100, 0).unwrap(),
+            Some("Discussed Rust async patterns".to_string())
+        );
+
+        // Different thread
+        assert_eq!(get_scoped_summary_on_conn(&conn, 100, 42).unwrap(), None);
+        save_scoped_summary_on_conn(&conn, 100, 42, "Topic 42 summary").unwrap();
+        assert_eq!(
+            get_scoped_summary_on_conn(&conn, 100, 42).unwrap(),
+            Some("Topic 42 summary".to_string())
+        );
+
+        // Upsert
+        save_scoped_summary_on_conn(&conn, 100, 0, "Updated summary").unwrap();
+        assert_eq!(
+            get_scoped_summary_on_conn(&conn, 100, 0).unwrap(),
+            Some("Updated summary".to_string())
         );
     }
 }

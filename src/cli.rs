@@ -2881,7 +2881,7 @@ async fn execute_cli_chat_turn(
     let start = std::time::Instant::now();
 
     tokio::select! {
-        res = ai_service.generate_response(user_id, generation_input, &mut cancel_rx) => {
+        res = ai_service.generate_response(user_id, 0, user_id, generation_input, &mut cancel_rx) => {
             spinner_done.store(true, Ordering::Relaxed);
             if let Some(handle) = spinner_handle {
                 let _ = handle.await;
@@ -2936,6 +2936,160 @@ async fn execute_cli_chat_turn(
     }
 }
 
+pub(crate) async fn run_cli_memory(
+    _ai_service: &AIChatService,
+    action: Option<&str>,
+    target: Option<&str>,
+) {
+    load_environment();
+    let owner_id = get_configured_owner_id().unwrap_or(0);
+    if owner_id == 0 {
+        println!("\n\x1b[33m⚠ OWNER_USER_ID belum dikonfigurasi. Jalankan 'xiao gateway owner <ID>'.\x1b[0m\n");
+        return;
+    }
+
+    match action {
+        Some("clear") => {
+            if crate::ai::storage::clear_user_memories_async(owner_id).await {
+                println!("\n\x1b[1;32m✔ Semua memori jangka panjang (Tier 1) untuk Owner ({owner_id}) berhasil dihapus.\x1b[0m\n");
+            } else {
+                println!("\n\x1b[31m✖ Gagal membersihkan memori pengguna.\x1b[0m\n");
+            }
+        }
+        Some("rm") | Some("remove") | Some("delete") => {
+            if let Some(key) = target {
+                if crate::ai::storage::delete_user_memory_async(owner_id, key.to_string()).await {
+                    println!("\n\x1b[1;32m✔ Memori '{key}' berhasil dihapus untuk Owner ({owner_id}).\x1b[0m\n");
+                } else {
+                    println!("\n\x1b[31m✖ Gagal menghapus memori '{key}'.\x1b[0m\n");
+                }
+            } else {
+                println!("\n\x1b[33mGunakan: xiao memory rm <key>\x1b[0m\n");
+            }
+        }
+        Some("list") | None => {
+            let memories = crate::ai::storage::get_user_memories_async(owner_id).await;
+            println!("\n\x1b[1;36m== Xiao Long-Term Memory (Tier 1 Facts) ==\x1b[0m");
+            println!("  \x1b[38;5;245mOwner ID :\x1b[0m \x1b[1;37m{owner_id}\x1b[0m");
+            println!(
+                "  \x1b[38;5;245mTotal    :\x1b[0m \x1b[1;37m{} facts remembered\x1b[0m\n",
+                memories.len()
+            );
+
+            if memories.is_empty() {
+                println!("  \x1b[38;5;244m(Belum ada fakta yang tersimpan. Xiao akan mengingat fakta penting secara otomatis saat Anda mengobrol.)\x1b[0m\n");
+            } else {
+                let bar_width = get_terminal_bar_width();
+                println!("  \x1b[1;37m{:<25} Remembered Fact\x1b[0m", "Key / Topic");
+                println!(
+                    "  \x1b[38;5;238m{}\x1b[0m",
+                    "─".repeat(bar_width.saturating_sub(4))
+                );
+                for (key, fact) in memories {
+                    println!(
+                        "  \x1b[1;38;5;45m{:<25}\x1b[0m \x1b[38;5;252m{}\x1b[0m",
+                        key, fact
+                    );
+                }
+                println!(
+                    "  \x1b[38;5;238m{}\x1b[0m",
+                    "─".repeat(bar_width.saturating_sub(4))
+                );
+                println!("  \x1b[38;5;244mKelola: 'xiao memory rm <key>' atau 'xiao memory clear'\x1b[0m\n");
+            }
+        }
+        Some(unknown) => {
+            println!("\n\x1b[31m✖ Aksi '{unknown}' tidak dikenal. Gunakan: xiao memory [list|rm <key>|clear]\x1b[0m\n");
+        }
+    }
+}
+
+pub(crate) async fn run_cli_context(
+    ai_service: &AIChatService,
+    target_chat_id: Option<i64>,
+    target_thread_id: Option<i64>,
+) {
+    load_environment();
+    let owner_id = get_configured_owner_id().unwrap_or(0);
+    let chat_id = target_chat_id.unwrap_or(owner_id);
+    let thread_id = target_thread_id.unwrap_or(0);
+    let stats = ai_service
+        .get_scoped_context_stats(chat_id, thread_id, owner_id)
+        .await;
+    let bar_width = get_terminal_bar_width();
+
+    println!("\n\x1b[1;36m== Xiao Context Window & Memory Gauge ==\x1b[0m\n");
+    println!(
+        "  \x1b[38;5;245mScope           :\x1b[0m \x1b[1;37m{}\x1b[0m \x1b[38;5;244m(chat: {chat_id}, thread: {thread_id})\x1b[0m",
+        stats.session_name
+    );
+    println!(
+        "  \x1b[38;5;245mMain Model      :\x1b[0m \x1b[1;37m{}\x1b[0m",
+        stats.model_name
+    );
+    println!("  \x1b[38;5;245mContext Limit   :\x1b[0m \x1b[1;37m{} tokens\x1b[0m \x1b[38;5;244m({})\x1b[0m", stats.limit_tokens, stats.limit_str);
+    println!("  \x1b[38;5;245mActive Tokens   :\x1b[0m \x1b[1;37m{} tokens\x1b[0m \x1b[38;5;244m(~{} chars)\x1b[0m", stats.total_tokens, stats.total_chars);
+    println!(
+        "  \x1b[38;5;245mOutput Reserve  :\x1b[0m \x1b[1;37m{} tokens\x1b[0m",
+        stats.output_reserve_tokens
+    );
+    println!("  \x1b[38;5;245mSliding Window  :\x1b[0m \x1b[1;37m{} messages\x1b[0m \x1b[38;5;244m({} turns)\x1b[0m", stats.total_messages, stats.total_turns);
+    println!(
+        "  \x1b[38;5;245mAttachments     :\x1b[0m \x1b[1;37m{}\x1b[0m",
+        stats.attachment_count
+    );
+
+    let gauge_len = 30;
+    let filled = ((stats.usage_pct / 100.0) * gauge_len as f64).round() as usize;
+    let filled = filled.min(gauge_len);
+    let empty = gauge_len - filled;
+    let gauge_color = if stats.usage_pct < 60.0 {
+        "\x1b[1;32m"
+    } else if stats.usage_pct < 85.0 {
+        "\x1b[1;33m"
+    } else {
+        "\x1b[1;31m"
+    };
+    println!("\n  \x1b[1;37mContext Utilization:\x1b[0m");
+    println!(
+        "  {}[{}{}]\x1b[0m \x1b[1;37m{:.1}%\x1b[0m",
+        gauge_color,
+        "█".repeat(filled),
+        "░".repeat(empty),
+        stats.usage_pct
+    );
+
+    let memories = crate::ai::storage::get_user_memories_async(owner_id).await;
+    println!("\n  \x1b[1;37mLong-Term Facts (Tier 1):\x1b[0m \x1b[1;36m{} facts stored\x1b[0m \x1b[38;5;244m(manage with 'xiao memory')\x1b[0m", memories.len());
+
+    if !stats.messages_breakdown.is_empty() {
+        println!("\n  \x1b[1;37mActive Sliding Window Breakdown (Recent):\x1b[0m");
+        println!(
+            "  \x1b[38;5;238m{}\x1b[0m",
+            "─".repeat(bar_width.saturating_sub(4))
+        );
+        for item in stats.messages_breakdown.iter().rev().take(10) {
+            let role_badge = if item.role == "user" {
+                "\x1b[1;34m[User]     \x1b[0m"
+            } else if item.role == "assistant" {
+                "\x1b[1;32m[Assistant]\x1b[0m"
+            } else {
+                "\x1b[1;33m[System]   \x1b[0m"
+            };
+            println!(
+                "  {} \x1b[38;5;245m{:>5} tok\x1b[0m │ \x1b[38;5;252m{}\x1b[0m",
+                role_badge, item.tokens, item.preview
+            );
+        }
+        println!(
+            "  \x1b[38;5;238m{}\x1b[0m\n",
+            "─".repeat(bar_width.saturating_sub(4))
+        );
+    } else {
+        println!();
+    }
+}
+
 pub(crate) fn print_cli_help() {
     println!(
         "\n\x1b[1;36mxiao v{} — AI Assistant Bot\x1b[0m\n",
@@ -2950,6 +3104,8 @@ pub(crate) fn print_cli_help() {
         "  \x1b[36msetup\x1b[0m               Interactive initial setup wizard (AI -> Telegram)"
     );
     println!("  \x1b[36mstatus\x1b[0m              Display system, database, and provider status dashboard");
+    println!("  \x1b[36mcontext [chat] [th]\x1b[0m  Display token consumption and context gauge (default: owner private chat)");
+    println!("  \x1b[36mmemory [action]\x1b[0m     Manage long-term user memories (list, rm <key>, clear)");
     println!("  \x1b[36mai [action]\x1b[0m         Unified AI management hub (Model, Provider, Addon) [Interactive/One-Liner]");
     println!("  \x1b[36mgateway [action]\x1b[0m    Manage Telegram messaging gateway (Token & Owner ID) [Interactive/One-Liner]");
     println!("  \x1b[36mversion, -v\x1b[0m         Display binary version");
@@ -2958,6 +3114,14 @@ pub(crate) fn print_cli_help() {
     println!("     \x1b[36mxiao chat\x1b[0m               Start interactive terminal chat session");
     println!(
         "     \x1b[36mxiao chat <prompt>\x1b[0m      Send one-shot query and print response\n"
+    );
+    println!("\x1b[1;37mSubcommands for 'memory':\x1b[0m");
+    println!(
+        "     \x1b[36mxiao memory\x1b[0m                 List remembered long-term facts (default)"
+    );
+    println!("     \x1b[36mxiao memory rm <key>\x1b[0m        Remove a specific remembered fact");
+    println!(
+        "     \x1b[36mxiao memory clear\x1b[0m           Wipe all remembered facts for the owner\n"
     );
     println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
     println!("     \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
@@ -3135,5 +3299,10 @@ mod tests {
     fn test_menu_bar_width_bounds() {
         let width = get_terminal_bar_width();
         assert!((40..=MENU_BAR_WIDTH).contains(&width));
+    }
+
+    #[test]
+    fn test_cli_help_includes_memory_and_context() {
+        print_cli_help();
     }
 }

@@ -226,3 +226,23 @@ fn parsed_collage_and_slideshow_serialize_with_10_3_discriminators() {
     assert_eq!(value["blocks"][1]["type"], "slideshow");
     assert_eq!(value["blocks"][1]["blocks"].as_array().unwrap().len(), 2);
 }
+
+#[test]
+fn telegram_command_registration_is_exclusively_start() {
+    let source = include_str!("../src/main.rs");
+    let cmd_start = source
+        .find("// Register Bot Commands")
+        .expect("bot command registration block");
+    let cmd_end = source[cmd_start..]
+        .find("bot.set_my_commands")
+        .map(|offset| cmd_start + offset)
+        .expect("bot.set_my_commands call");
+    let block = &source[cmd_start..cmd_end];
+    assert!(block.contains("BotCommand::ephemeral(\"start\","));
+    assert!(!block.contains("\"menu\""));
+    assert!(!block.contains("\"help\""));
+    assert!(!block.contains("\"clear\""));
+    assert!(!block.contains("\"image\""));
+    assert!(!block.contains("\"session\""));
+    assert!(!block.contains("\"context\""));
+}

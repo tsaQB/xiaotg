@@ -23,8 +23,7 @@ use ai::service::{GenerationModelSnapshot, ImageGenerationErrorKind, ProbeEvent,
 use ai::AIChatService;
 use bot::client::{TelegramBotClient, TelegramDeliveryContext};
 use bot::models::{
-    BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, InputRichMessage, ReplyKeyboardRemove,
-    RichBlock, RichBlockListItem, RichBlockTableCell, RichMessageButton, Update,
+    BotCommand, InputRichMessage, ReplyKeyboardRemove, RichBlock, RichBlockTableCell, Update,
 };
 use parser::build_full_rich_message;
 use timeline::{ExecutionTimeline, ProgressActivity};
@@ -168,222 +167,9 @@ pub(crate) fn get_configured_token() -> Option<String> {
 
 use cli::*;
 
-fn get_main_menu_keyboard() -> Value {
-    serde_json::to_value(ReplyKeyboardRemove {
-        remove_keyboard: true,
-        selective: None,
-    })
-    .unwrap_or_else(|error| {
-        error!("Failed to serialize ReplyKeyboardRemove: {error}");
-        json!({})
-    })
-}
-
-fn get_collapsed_menu_keyboard() -> Value {
-    get_main_menu_keyboard()
-}
-
 // ==========================================
 // UI Builders
 // ==========================================
-
-fn truncate_session_name(name: &str, max_chars: usize) -> String {
-    if name.chars().count() <= max_chars {
-        return name.to_string();
-    }
-
-    let truncated: String = name.chars().take(max_chars.saturating_sub(3)).collect();
-    format!("{truncated}...")
-}
-
-#[allow(dead_code)]
-fn session_last_activity(session: &ai::service::ChatSession) -> String {
-    let last_message = session.messages.last();
-    let Some(message) = last_message else {
-        return session.created_at.clone();
-    };
-
-    match &message.content {
-        Value::String(content) if !content.trim().is_empty() => {
-            truncate_session_name(content.trim(), 16)
-        }
-        _ => session.created_at.clone(),
-    }
-}
-
-#[allow(dead_code)]
-async fn build_session_manager_ui(
-    ai_service: &AIChatService,
-    user_id: i64,
-    page: usize,
-    page_size: usize,
-) -> InputRichMessage {
-    let sessions = ai_service.get_sessions(user_id).await;
-    let active_idx = ai_service.get_active_session_index(user_id).await;
-
-    let total_sessions = sessions.len();
-    let total_pages = 1.max(total_sessions.div_ceil(page_size));
-    let curr_page = 1.max(page.min(total_pages));
-    let start_idx = (curr_page - 1) * page_size;
-    let end_idx = (start_idx + page_size).min(total_sessions);
-    let page_sessions = &sessions[start_idx..end_idx];
-
-    let mut table_rows = vec![vec![
-        RichBlockTableCell::text_only("#", true, Some("center")),
-        RichBlockTableCell::text_only("Session", true, Some("left")),
-        RichBlockTableCell::text_only("Status", true, Some("left")),
-    ]];
-    let mut session_buttons = Vec::new();
-    for (offset, session) in page_sessions.iter().enumerate() {
-        let global_idx = start_idx + offset;
-        let name = if session.name.trim().is_empty() {
-            format!("Session {}", global_idx + 1)
-        } else {
-            session.name.trim().to_string()
-        };
-        let is_active = global_idx == active_idx;
-        let status = if is_active {
-            format!("Active · {} msgs", session.messages.len())
-        } else {
-            format!(
-                "{} msgs · {}",
-                session.messages.len(),
-                session_last_activity(session)
-            )
-        };
-        table_rows.push(vec![
-            RichBlockTableCell::text_only(&(global_idx + 1).to_string(), false, Some("center")),
-            RichBlockTableCell::text_only(&truncate_session_name(&name, 28), false, Some("left")),
-            RichBlockTableCell::text_only(&status, false, Some("left")),
-        ]);
-        session_buttons.push(if is_active {
-            RichMessageButton::callback_styled(
-                format!("✓ {}", global_idx + 1),
-                format!("session_select_id:{}", session.id),
-                "primary",
-            )
-        } else {
-            RichMessageButton::callback(
-                (global_idx + 1).to_string(),
-                format!("session_select_id:{}", session.id),
-            )
-        });
-    }
-
-    let active_session_id = sessions
-        .get(active_idx)
-        .map(|session| session.id)
-        .unwrap_or_default();
-    let mut blocks = vec![
-        RichBlock::SectionHeading {
-            text: Value::String("SESSIONS".to_string()),
-            level: 1,
-        },
-        RichBlock::Paragraph {
-            text: Value::String(format!(
-                "Active: {}",
-                sessions
-                    .get(active_idx)
-                    .map(|session| truncate_session_name(&session.name, 36))
-                    .unwrap_or_else(|| "-".to_string())
-            )),
-        },
-        RichBlock::Table {
-            cells: table_rows,
-            has_header: true,
-            is_bordered: true,
-            is_striped: true,
-            is_compact: true,
-            caption: None,
-        },
-    ];
-    if !session_buttons.is_empty() {
-        blocks.push(RichBlock::Buttons {
-            buttons: session_buttons,
-            align: Some("center".to_string()),
-        });
-    }
-    if total_pages > 1 {
-        blocks.push(RichBlock::Buttons {
-            buttons: vec![
-                if curr_page > 1 {
-                    RichMessageButton::callback("‹", format!("session_page:{}", curr_page - 1))
-                } else {
-                    RichMessageButton::disabled("‹")
-                },
-                RichMessageButton::disabled(format!("{curr_page}/{total_pages}")),
-                if curr_page < total_pages {
-                    RichMessageButton::callback("›", format!("session_page:{}", curr_page + 1))
-                } else {
-                    RichMessageButton::disabled("›")
-                },
-            ],
-            align: Some("center".to_string()),
-        });
-    }
-    blocks.push(RichBlock::Buttons {
-        buttons: vec![
-            RichMessageButton::callback_styled("New", "session_new", "primary"),
-            RichMessageButton::callback(
-                "Rename Active",
-                format!("session_rename_id:{active_session_id}"),
-            ),
-            RichMessageButton::callback_styled(
-                "Delete Active",
-                format!("session_remove_id:{active_session_id}"),
-                "danger",
-            ),
-        ],
-        align: Some("center".to_string()),
-    });
-    blocks.push(RichBlock::Buttons {
-        buttons: vec![RichMessageButton::callback("Close", "session_close")],
-        align: Some("center".to_string()),
-    });
-    InputRichMessage::new(blocks)
-}
-
-#[allow(dead_code)]
-async fn send_or_update_session_manager(
-    bot: &TelegramBotClient,
-    ai_service: &AIChatService,
-    chat_id: i64,
-    user_id: i64,
-    message_id: Option<i64>,
-    page: usize,
-) {
-    let rich_msg = build_session_manager_ui(ai_service, user_id, page, 5).await;
-
-    if let Some(mid) = message_id {
-        if bot
-            .edit_rich_message(chat_id, mid, &rich_msg, None)
-            .await
-            .is_ok()
-        {
-            ai_service
-                .user_session_msg_id
-                .write()
-                .await
-                .insert(user_id, mid);
-            return;
-        }
-    }
-
-    let res = bot.send_rich_message(chat_id, &rich_msg, None, None).await;
-    if let Ok(val) = res {
-        if let Some(new_id) = val
-            .get("result")
-            .and_then(|result| result.get("message_id"))
-            .and_then(Value::as_i64)
-        {
-            ai_service
-                .user_session_msg_id
-                .write()
-                .await
-                .insert(user_id, new_id);
-        }
-    }
-}
 
 async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMessage {
     let main = ai_service
@@ -399,11 +185,6 @@ async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMe
         .as_ref()
         .map(|route| route.provider.name.clone())
         .unwrap_or_else(|| "Not configured".to_string());
-    let session_name = if stats.session_name.trim().is_empty() {
-        format!("Session #{}", stats.session_id)
-    } else {
-        truncate_session_name(&stats.session_name, 32)
-    };
     let context = if main.is_some() {
         format!(
             "Ready · ~{} / ~{} tokens",
@@ -419,7 +200,7 @@ async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMe
             level: 1,
         },
         RichBlock::Paragraph {
-            text: Value::String("Personal AI Assistant".to_string()),
+            text: Value::String("Personal Conversational AI Assistant".to_string()),
         },
         RichBlock::Table {
             cells: vec![
@@ -436,8 +217,8 @@ async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMe
                     RichBlockTableCell::text_only(&provider_name, false, Some("left")),
                 ],
                 vec![
-                    RichBlockTableCell::text_only("Session", false, Some("left")),
-                    RichBlockTableCell::text_only(&session_name, false, Some("left")),
+                    RichBlockTableCell::text_only("Memory", false, Some("left")),
+                    RichBlockTableCell::text_only("Hierarchical Tier 1 & 2", false, Some("left")),
                 ],
                 vec![
                     RichBlockTableCell::text_only("Context", false, Some("left")),
@@ -453,74 +234,21 @@ async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMe
         RichBlock::BlockQuotation {
             blocks: vec![json!({
                 "type":"paragraph",
-                "text":"Kirim teks, gambar, dokumen, video, atau voice note untuk mulai mengobrol.\n\nPerintah bantuan:\n• /clear — Reset riwayat obrolan\n• /new — Mulai sesi baru\n• /help — Panduan perintah"
+                "text":"Kirim pesan teks, pertanyaan, gambar, dokumen, video, atau voice note secara alami.\nXiao mengingat preferensi dan konteks percakapan Anda secara otomatis tanpa perlu perintah menu."
             })],
         },
         RichBlock::Paragraph {
             text: Value::String(
-                "Model AI dan status sistem dikelola melalui Xiao CLI.".to_string(),
+                "Konfigurasi model dan status sistem dikelola melalui Xiao CLI di terminal."
+                    .to_string(),
             ),
         },
     ])
 }
 
-#[allow(dead_code)]
-async fn build_menu_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMessage {
-    let main = ai_service
-        .resolve_model_route_unchecked(ai::service::ModelRole::Main)
-        .await
-        .ok();
-    let stats = ai_service.get_context_stats(user_id).await;
-    let main_model = main
-        .as_ref()
-        .map(|route| format!("{} / {}", route.provider.name, route.model))
-        .unwrap_or_else(|| "Not configured".to_string());
-    let session_name = if stats.session_name.trim().is_empty() {
-        format!("Session #{}", stats.session_id)
-    } else {
-        truncate_session_name(&stats.session_name, 36)
-    };
-
-    InputRichMessage::new(vec![
-        RichBlock::SectionHeading {
-            text: Value::String("MENU".to_string()),
-            level: 1,
-        },
-        RichBlock::Table {
-            cells: vec![
-                vec![
-                    RichBlockTableCell::text_only("Main Model", true, Some("left")),
-                    RichBlockTableCell::text_only("Session", true, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only(&main_model, false, Some("left")),
-                    RichBlockTableCell::text_only(&session_name, false, Some("left")),
-                ],
-            ],
-            has_header: true,
-            is_bordered: true,
-            is_striped: true,
-            is_compact: true,
-            caption: None,
-        },
-        RichBlock::Buttons {
-            buttons: vec![
-                RichMessageButton::callback_styled("New Chat", "session_new", "primary"),
-                RichMessageButton::callback("Session", "open_session"),
-            ],
-            align: Some("center".to_string()),
-        },
-        RichBlock::Buttons {
-            buttons: vec![
-                RichMessageButton::callback("Generate Image", "img_new"),
-                RichMessageButton::callback("Help", "action_help"),
-            ],
-            align: Some("center".to_string()),
-        },
-    ])
-}
-
+#[cfg(test)]
 fn build_help_ui() -> InputRichMessage {
+    use bot::models::RichBlockListItem;
     let input_items = vec![
         RichBlockListItem::bullet(vec![
             json!({"type":"paragraph","text":"Text — ordinary chat and instructions."}),
@@ -599,6 +327,7 @@ fn build_help_ui() -> InputRichMessage {
     ])
 }
 
+#[cfg(test)]
 fn specialist_context_policy(
     role: ai::service::ModelRole,
     origin: ai::service::RouteOrigin,
@@ -785,7 +514,9 @@ async fn run_observable_main_capability_probe(
     let _ = bot.send_rich_message(chat_id, &completed, None, None).await;
 }
 
+#[cfg(test)]
 fn build_clear_confirmation_ui() -> InputRichMessage {
+    use bot::models::RichMessageButton;
     InputRichMessage::new(vec![
         RichBlock::SectionHeading {
             text: Value::String("RESET HISTORY?".to_string()),
@@ -806,219 +537,6 @@ fn build_clear_confirmation_ui() -> InputRichMessage {
     ])
 }
 
-#[allow(dead_code)]
-async fn build_context_monitor_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMessage {
-    let stats = ai_service.get_context_stats(user_id).await;
-    let main = ai_service
-        .resolve_model_route_unchecked(ai::service::ModelRole::Main)
-        .await
-        .ok();
-    let main_name = main
-        .as_ref()
-        .map(|route| format!("{} / {}", route.provider.name, route.model))
-        .unwrap_or_else(|| stats.model_name.clone());
-
-    let used = stats.total_tokens;
-    let limit = stats.limit_tokens.max(1);
-    let available = context_available_tokens(limit, used);
-    let progress = format!(
-        "{}  ~{:.1}%  ~{} / ~{} tokens",
-        stats.progress_bar, stats.usage_pct, used, limit
-    );
-
-    let routing = ai_service.model_routing_config().await;
-    let providers = ai_service.get_user_providers(user_id).await;
-    let mut specialist_rows = vec![vec![
-        RichBlockTableCell::text_only("Role", true, Some("left")),
-        RichBlockTableCell::text_only("Route", true, Some("left")),
-        RichBlockTableCell::text_only("Policy", true, Some("left")),
-    ]];
-    let mut provider_context = Vec::new();
-
-    for role in ai::service::ModelRole::addon_roles() {
-        let route = routing
-            .route(role)
-            .cloned()
-            .unwrap_or(ai::service::ModelRoute::MainModel);
-        let (route_text, policy) = match route {
-            ai::service::ModelRoute::MainModel => (
-                "Main Model".to_string(),
-                specialist_context_policy(role, ai::service::RouteOrigin::MainModel).to_string(),
-            ),
-            ai::service::ModelRoute::Disabled => ("Disabled".to_string(), "Disabled".to_string()),
-            ai::service::ModelRoute::Specific { provider_id, model } => {
-                let provider_name = providers
-                    .iter()
-                    .find(|provider| provider.id == provider_id)
-                    .map(|provider| provider.name.as_str())
-                    .unwrap_or(provider_id.as_str());
-                let resolved = format!("{provider_name} / {model}");
-                let policy =
-                    specialist_context_policy(role, ai::service::RouteOrigin::Specific).to_string();
-                let sent = match role {
-                    ai::service::ModelRole::Vision | ai::service::ModelRole::Video => {
-                        "current media + current question"
-                    }
-                    ai::service::ModelRole::AudioStt => "current audio only",
-                    ai::service::ModelRole::ImageGeneration => "prompt/config only",
-                    ai::service::ModelRole::Main => "canonical Main context",
-                };
-                provider_context.push(format!(
-                    "{} — {}\nSent: {}\nNot sent: full session history\nPolicy: Minimal",
-                    role.display_name(),
-                    resolved,
-                    sent
-                ));
-                (resolved, policy)
-            }
-        };
-        specialist_rows.push(vec![
-            RichBlockTableCell::text_only(
-                role.display_name().trim_end_matches(" Model"),
-                false,
-                Some("left"),
-            ),
-            RichBlockTableCell::text_only(&route_text, false, Some("left")),
-            RichBlockTableCell::text_only(&policy, false, Some("left")),
-        ]);
-    }
-
-    let specialist_table = serde_json::to_value(RichBlock::Table {
-        cells: specialist_rows,
-        has_header: true,
-        is_bordered: true,
-        is_striped: true,
-        is_compact: true,
-        caption: None,
-    })
-    .unwrap_or_else(|_| json!({"type":"paragraph","text":"Specialist routing unavailable."}));
-
-    let health_text = if stats.usage_pct >= 80.0 {
-        "Context warning: Main Model context is near/full. Xiao will compact provider context before the next request when necessary; stored history is not silently deleted."
-    } else {
-        "✓ Context healthy"
-    };
-
-    InputRichMessage::new(vec![
-        RichBlock::SectionHeading {
-            text: Value::String("CONTEXT".to_string()),
-            level: 1,
-        },
-        RichBlock::Paragraph {
-            text: Value::String(format!(
-                "Session #{} — {}\nMain: {}",
-                stats.session_id,
-                truncate_session_name(&stats.session_name, 36),
-                main_name
-            )),
-        },
-        RichBlock::Preformatted {
-            text: progress,
-            language: None,
-        },
-        RichBlock::Table {
-            cells: vec![
-                vec![
-                    RichBlockTableCell::text_only("Canonical Main", true, Some("left")),
-                    RichBlockTableCell::text_only("Value", true, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Messages", false, Some("left")),
-                    RichBlockTableCell::text_only(
-                        &stats.total_messages.to_string(),
-                        false,
-                        Some("left"),
-                    ),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Attachments", false, Some("left")),
-                    RichBlockTableCell::text_only(
-                        &stats.attachment_count.to_string(),
-                        false,
-                        Some("left"),
-                    ),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Used", false, Some("left")),
-                    RichBlockTableCell::text_only(&format!("~{used} tokens"), false, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Available", false, Some("left")),
-                    RichBlockTableCell::text_only(
-                        &format!("~{available} tokens"),
-                        false,
-                        Some("left"),
-                    ),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Output Reserve", false, Some("left")),
-                    RichBlockTableCell::text_only(
-                        &format!("~{} tokens", stats.output_reserve_tokens),
-                        false,
-                        Some("left"),
-                    ),
-                ],
-            ],
-            has_header: true,
-            is_bordered: true,
-            is_striped: true,
-            is_compact: true,
-            caption: None,
-        },
-        RichBlock::BlockQuotation {
-            blocks: vec![json!({"type":"paragraph","text":health_text})],
-        },
-        RichBlock::Details {
-            summary: Value::String("Specialist Routing & Context".to_string()),
-            blocks: vec![specialist_table],
-            is_open: Some(false),
-        },
-        RichBlock::Details {
-            summary: Value::String("Provider Context".to_string()),
-            blocks: vec![json!({
-                "type":"paragraph",
-                "text": if provider_context.is_empty() {
-                    "No Specific cross-provider addon is active. Configured Main Model routes execute directly without probing. Context windows are never added together.".to_string()
-                } else {
-                    format!(
-                        "{}\n\nContext windows are never added together.",
-                        provider_context.join("\n\n")
-                    )
-                }
-            })],
-            is_open: Some(false),
-        },
-        RichBlock::Buttons {
-            buttons: vec![
-                RichMessageButton::callback_styled("Refresh", "context_refresh", "primary"),
-                RichMessageButton::callback("Close", "context_close"),
-            ],
-            align: Some("center".to_string()),
-        },
-    ])
-}
-
-#[allow(dead_code)]
-async fn send_or_update_context_monitor(
-    bot: &TelegramBotClient,
-    ai_service: &AIChatService,
-    chat_id: i64,
-    user_id: i64,
-    message_id: Option<i64>,
-) {
-    let rich_msg = build_context_monitor_ui(ai_service, user_id).await;
-    if let Some(mid) = message_id {
-        if bot
-            .edit_rich_message(chat_id, mid, &rich_msg, None)
-            .await
-            .is_ok()
-        {
-            return;
-        }
-    }
-    let _ = bot.send_rich_message(chat_id, &rich_msg, None, None).await;
-}
-
 async fn send_welcome(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
@@ -1026,18 +544,14 @@ async fn send_welcome(
     user_id: i64,
 ) {
     let rich = build_start_ui(ai_service, user_id).await;
-    let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-}
-
-#[allow(dead_code)]
-async fn send_menu(
-    bot: &TelegramBotClient,
-    ai_service: &AIChatService,
-    chat_id: i64,
-    user_id: i64,
-) {
-    let rich = build_menu_ui(ai_service, user_id).await;
-    let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
+    let _ = bot
+        .send_rich_message(
+            chat_id,
+            &rich,
+            serde_json::to_value(ReplyKeyboardRemove::new()).ok(),
+            None,
+        )
+        .await;
 }
 
 // ==========================================
@@ -1334,11 +848,13 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_image_generation(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
     user_last_image_prompt: &UserLastImagePrompt,
     chat_id: i64,
+    thread_id: i64,
     user_id: i64,
     prompt: &str,
     explanation_prompt: Option<&str>,
@@ -1359,17 +875,16 @@ async fn handle_image_generation(
         .contains(&clean_prompt.as_str())
     {
         let mut last_context = String::new();
-        if let Some(sess) = ai_service.get_active_session(user_id).await {
-            for msg in sess.messages.iter().rev() {
-                let candidate = match &msg.content {
-                    Value::String(value) => Some(value.clone()),
-                    value => attachments::decode_user_content(value).map(|content| content.text),
-                };
-                if let Some(candidate) = candidate {
-                    if candidate.trim().chars().count() > 8 {
-                        last_context = candidate.trim().to_string();
-                        break;
-                    }
+        let scoped_messages = ai::storage::load_scoped_messages_async(chat_id, thread_id, 10).await;
+        for msg in scoped_messages.iter().rev() {
+            let candidate = match &msg.content {
+                Value::String(value) => Some(value.clone()),
+                value => attachments::decode_user_content(value).map(|content| content.text),
+            };
+            if let Some(candidate) = candidate {
+                if candidate.trim().chars().count() > 8 {
+                    last_context = candidate.trim().to_string();
+                    break;
                 }
             }
         }
@@ -1385,14 +900,6 @@ async fn handle_image_generation(
     }
 
     if clean_prompt.is_empty() {
-        let mut map = HashMap::new();
-        map.insert("step".to_string(), "awaiting_image_prompt".to_string());
-        ai_service
-            .user_wizard_state
-            .write()
-            .await
-            .insert(user_id, map);
-
         let route_text = match ai_service
             .resolve_model_route_unchecked(ai::service::ModelRole::ImageGeneration)
             .await
@@ -1401,22 +908,37 @@ async fn handle_image_generation(
             Err(error) => format!("Unavailable — {}", error),
         };
         let rich = InputRichMessage::new(vec![
-            RichBlock::SectionHeading { text: Value::String("IMAGE GENERATION".to_string()), level: 1 },
+            RichBlock::SectionHeading {
+                text: Value::String("IMAGE GENERATION".to_string()),
+                level: 1,
+            },
             RichBlock::Table {
                 cells: vec![
-                    vec![RichBlockTableCell::text_only("Image Model", true, Some("left")), RichBlockTableCell::text_only("Default Size", true, Some("left"))],
-                    vec![RichBlockTableCell::text_only(&route_text, false, Some("left")), RichBlockTableCell::text_only("1024 × 1024", false, Some("left"))],
+                    vec![
+                        RichBlockTableCell::text_only("Image Model", true, Some("left")),
+                        RichBlockTableCell::text_only("Default Size", true, Some("left")),
+                    ],
+                    vec![
+                        RichBlockTableCell::text_only(&route_text, false, Some("left")),
+                        RichBlockTableCell::text_only("1024 × 1024", false, Some("left")),
+                    ],
                 ],
-                has_header: true, is_bordered: true, is_striped: true, is_compact: true, caption: None,
+                has_header: true,
+                is_bordered: true,
+                is_striped: true,
+                is_compact: true,
+                caption: None,
             },
-            RichBlock::Paragraph { text: Value::String("Send the image description. Generation may take up to the configured timeout (default 120 seconds).".to_string()) },
-            RichBlock::Buttons { buttons: vec![RichMessageButton::callback("Cancel", "provider_cancel")], align: Some("center".to_string()) },
+            RichBlock::Paragraph {
+                text: Value::String(
+                    "Kirim deskripsi gambar yang ingin dibuat (contoh: \"buat gambar pemandangan pegunungan saat fajar\").".to_string(),
+                ),
+            },
         ]);
         let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
         return;
     }
 
-    ai_service.user_wizard_state.write().await.remove(&user_id);
     user_last_image_prompt
         .write()
         .await
@@ -1471,10 +993,6 @@ async fn handle_image_generation(
                     },
                     RichBlock::Paragraph {
                         text: Value::String("Image generation was cancelled.".to_string()),
-                    },
-                    RichBlock::Buttons {
-                        buttons: vec![RichMessageButton::callback("New Image", "img_new")],
-                        align: Some("center".to_string()),
                     },
                 ]);
                 let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
@@ -1543,13 +1061,6 @@ async fn handle_image_generation(
                     })],
                 });
             }
-            blocks.push(RichBlock::Buttons {
-                buttons: vec![
-                    RichMessageButton::callback_styled("Retry", "img_regen", "primary"),
-                    RichMessageButton::callback("New Image", "img_new"),
-                ],
-                align: Some("center".to_string()),
-            });
             let rich = InputRichMessage::new(blocks);
             let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
             return;
@@ -1566,22 +1077,10 @@ async fn handle_image_generation(
         generated.primary_failure.as_deref(),
     );
 
-    let mut img_kb_rows = vec![vec![
-        InlineKeyboardButton::callback("🔄 Buat Ulang (Regenerate)", "img_regen"),
-        InlineKeyboardButton::callback("🫟 Gambar Baru", "img_new"),
-    ]];
-    if !clean_prompt.is_empty() && clean_prompt.chars().count() <= 256 {
-        img_kb_rows.push(vec![InlineKeyboardButton::copy(
-            "📋 Salin Prompt",
-            &clean_prompt,
-        )]);
-    }
-    let img_kb = InlineKeyboardMarkup::new(img_kb_rows);
-
     let delivery = deliver_generated_image_with(
         &generated.bytes,
         &caption_text,
-        serde_json::to_value(img_kb).ok(),
+        None,
         |bytes, caption, parse_mode, reply_markup| async move {
             bot.send_photo_bytes(
                 chat_id,
@@ -1639,6 +1138,7 @@ async fn handle_image_generation(
             bot,
             ai_service,
             chat_id,
+            thread_id,
             user_id,
             ChatInput {
                 prompt: explanation_prompt,
@@ -1667,6 +1167,7 @@ async fn handle_ai_chat(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
     chat_id: i64,
+    thread_id: i64,
     user_id: i64,
     input: ChatInput<'_>,
 ) {
@@ -1684,7 +1185,7 @@ async fn handle_ai_chat(
         video_duration,
         model_snapshot,
     } = input;
-    let generation_lock = ai_service.generation_lock(user_id).await;
+    let generation_lock = ai_service.generation_lock(chat_id, thread_id).await;
     let _generation_guard = generation_lock.lock().await;
 
     let draft_id: i64 = rand::thread_rng().gen_range(100000..999999);
@@ -1738,11 +1239,24 @@ async fn handle_ai_chat(
     let generation_start = std::time::Instant::now();
     let (_thinking, mut answer_text, _cancelled) = if let Some(snapshot) = model_snapshot {
         ai_service
-            .generate_response_with_snapshot(user_id, generation_input, snapshot, &mut cancel_rx)
+            .generate_response_with_snapshot(
+                chat_id,
+                thread_id,
+                user_id,
+                generation_input,
+                snapshot,
+                &mut cancel_rx,
+            )
             .await
     } else {
         ai_service
-            .generate_response(user_id, generation_input, &mut cancel_rx)
+            .generate_response(
+                chat_id,
+                thread_id,
+                user_id,
+                generation_input,
+                &mut cancel_rx,
+            )
             .await
     };
 
@@ -1764,12 +1278,7 @@ async fn handle_ai_chat(
 
     let full_rich_msg = build_full_rich_message(&answer_text, Some(&elapsed));
     let res = bot
-        .send_rich_message(
-            chat_id,
-            &full_rich_msg,
-            Some(get_collapsed_menu_keyboard()),
-            None,
-        )
+        .send_rich_message(chat_id, &full_rich_msg, None, None)
         .await;
 
     if let Err(error) = res {
@@ -1844,63 +1353,17 @@ fn command_args<'a>(text: &'a str, command: &str) -> Option<&'a str> {
     Some(mention[mention_end..].trim_start())
 }
 
-fn callback_prefix_matches(data: &str, prefix: &str) -> bool {
-    data == prefix
-        || data
-            .strip_prefix(prefix)
-            .is_some_and(|rest| rest.starts_with(':'))
-}
-
 fn is_control_message_text(text: &str) -> bool {
     let text = text.trim();
     if text.is_empty() {
         return false;
     }
-    if command_matches(text, "/image") {
-        return false;
-    }
-
-    let commands = [
-        "/start", "/menu", "/new", "/session", "/context", "/clear", "/cancel", "/help",
-    ];
-    if commands
-        .iter()
-        .any(|command| command_matches(text, command))
-    {
-        return true;
-    }
-
-    [
-        "📱 Menu",
-        "Menu",
-        "menu",
-        "Main Menu",
-        "main menu",
-        "New",
-        "new",
-        "Chat Baru",
-        "Session",
-        "session",
-        "Clear",
-        "clear",
-        "Help",
-        "help",
-        "Bantuan",
-    ]
-    .contains(&text)
+    command_matches(text, "/start")
 }
 
-async fn classify_update_lane(ai_service: &AIChatService, update: &Update) -> UpdateLane {
-    if update.stopped_message_generation.is_some() {
+async fn classify_update_lane(_ai_service: &AIChatService, update: &Update) -> UpdateLane {
+    if update.stopped_message_generation.is_some() || update.callback_query.is_some() {
         return UpdateLane::Control;
-    }
-
-    if let Some(callback) = update.callback_query.as_ref() {
-        return if matches!(callback.data.as_deref(), Some("img_new" | "img_regen")) {
-            UpdateLane::Generation
-        } else {
-            UpdateLane::Control
-        };
     }
 
     let Some(message) = update.message.as_ref() else {
@@ -1917,44 +1380,12 @@ async fn classify_update_lane(ai_service: &AIChatService, update: &Update) -> Up
         return UpdateLane::Generation;
     }
 
-    let user_id = message
-        .from
-        .as_ref()
-        .map(|user| user.id)
-        .unwrap_or(message.chat.id);
     let text = message
         .text
         .as_deref()
         .or(message.caption.as_deref())
         .unwrap_or("")
         .trim();
-
-    let wizard = ai_service
-        .user_wizard_state
-        .read()
-        .await
-        .get(&user_id)
-        .cloned();
-    if let Some(wizard) = wizard {
-        if ["/cancel", "/batal", "batal", "cancel"].contains(&text) {
-            return UpdateLane::Control;
-        }
-        return if wizard.get("step").map(String::as_str) == Some("awaiting_image_prompt") {
-            UpdateLane::Generation
-        } else {
-            UpdateLane::Control
-        };
-    }
-
-    if ai_service
-        .user_waiting_rename
-        .read()
-        .await
-        .contains_key(&user_id)
-        && !text.starts_with('/')
-    {
-        return UpdateLane::Control;
-    }
 
     if is_control_message_text(text) {
         UpdateLane::Control
@@ -2104,6 +1535,7 @@ async fn handle_update(
     }
     if let Some(msg) = update.message {
         let chat_id = msg.chat.id;
+        let thread_id = msg.message_thread_id.unwrap_or(0);
         let user_id = msg.from.as_ref().map(|u| u.id).unwrap_or(chat_id);
         if !access.allows(user_id, chat_id) {
             return;
@@ -2258,7 +1690,7 @@ async fn handle_update(
                     chat_id,
                     "⚠️ <b>Gagal mengunduh gambar dari server Telegram.</b> Silakan coba kirim ulang.",
                     Some("HTML"),
-                    Some(get_main_menu_keyboard()),
+                    None,
                     None,
                     None,
                 )
@@ -2271,7 +1703,7 @@ async fn handle_update(
                     chat_id,
                     "⚠️ <b>Gagal mengunduh audio dari Telegram.</b> Silakan kirim ulang pesan suara/audio.",
                     Some("HTML"),
-                    Some(get_main_menu_keyboard()),
+                    None,
                     None,
                     None,
                 )
@@ -2292,7 +1724,7 @@ async fn handle_update(
                     chat_id,
                     "⚠️ <b>Gagal mengunduh dokumen dari Telegram.</b> Silakan kirim ulang file tersebut.",
                     Some("HTML"),
-                    Some(get_main_menu_keyboard()),
+                    None,
                     None,
                     None,
                 )
@@ -2313,124 +1745,9 @@ async fn handle_update(
             return;
         }
 
-        // Wizard state handler
-        let wizard_opt = {
-            let guard = ai_service.user_wizard_state.read().await;
-            guard.get(&user_id).cloned()
-        };
-
-        if let Some(wizard) = wizard_opt {
-            if !text.is_empty() {
-                if ["/cancel", "/batal", "batal", "cancel"].contains(&text.as_str()) {
-                    ai_service.user_wizard_state.write().await.remove(&user_id);
-                    let rich = InputRichMessage::new(vec![
-                        RichBlock::SectionHeading {
-                            text: Value::String("CANCELLED".to_string()),
-                            level: 1,
-                        },
-                        RichBlock::Paragraph {
-                            text: Value::String(
-                                "Current interactive action was cancelled.".to_string(),
-                            ),
-                        },
-                    ]);
-                    let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-                    return;
-                }
-
-                let step = wizard.get("step").map(|s| s.as_str()).unwrap_or("");
-                if step == "awaiting_image_prompt" {
-                    handle_image_generation(
-                        bot,
-                        ai_service,
-                        user_last_image_prompt,
-                        chat_id,
-                        user_id,
-                        &text,
-                        None,
-                    )
-                    .await;
-                    return;
-                }
-            }
-        }
-
-        // Rename session handler
-        let rename_opt = {
-            let guard = ai_service.user_waiting_rename.read().await;
-            guard.get(&user_id).copied()
-        };
-        if let Some(target_session_id) = rename_opt {
-            if !text.is_empty() && !text.starts_with('/') {
-                ai_service
-                    .user_waiting_rename
-                    .write()
-                    .await
-                    .remove(&user_id);
-                let orig_msg_id = ai_service.user_rename_msg_id.write().await.remove(&user_id);
-                let renamed = ai_service
-                    .rename_session_by_id(user_id, target_session_id, &text)
-                    .await;
-
-                let rename_notice = if renamed {
-                    format!(
-                        "✅ Session berhasil diubah namanya menjadi: <b>{}</b>",
-                        escape_html(&text)
-                    )
-                } else {
-                    "⚠️ <b>Nama session tidak diubah.</b> Penyimpanan gagal; state lama tetap dipertahankan."
-                        .to_string()
-                };
-                let _ = bot
-                    .send_message(
-                        chat_id,
-                        &rename_notice,
-                        Some("HTML"),
-                        Some(get_collapsed_menu_keyboard()),
-                        None,
-                        None,
-                    )
-                    .await;
-                send_or_update_session_manager(bot, ai_service, chat_id, user_id, orig_msg_id, 1)
-                    .await;
-                return;
-            }
-        }
-
         // Strict provider lock
         if !ai_service.has_configured_provider(user_id).await {
             send_welcome(bot, ai_service, chat_id, user_id).await;
-            return;
-        }
-
-        if ["/cancel", "/batal", "batal", "cancel"].contains(&text.as_str()) {
-            let rename_active = ai_service
-                .user_waiting_rename
-                .write()
-                .await
-                .remove(&user_id)
-                .is_some();
-            if rename_active {
-                ai_service.user_rename_msg_id.write().await.remove(&user_id);
-            }
-            let rich = InputRichMessage::new(vec![
-                RichBlock::SectionHeading {
-                    text: Value::String(if rename_active {
-                        "CANCELLED".to_string()
-                    } else {
-                        "NO ACTIVE ACTION".to_string()
-                    }),
-                    level: 1,
-                },
-                RichBlock::Paragraph {
-                    text: Value::String(if rename_active {
-                        "Current interactive action was cancelled.".to_string()
-                    } else {
-                        "No interactive action is currently active. Use Telegram's native Stop control to cancel an active generation.".to_string()
-                    }),
-                },
-            ]);
-            let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
             return;
         }
 
@@ -2455,7 +1772,7 @@ async fn handle_update(
                 audio_mime.as_deref(),
                 doc_name.as_deref(),
             );
-            handle_ai_chat(bot, ai_service, chat_id, user_id, chat_input).await;
+            handle_ai_chat(bot, ai_service, chat_id, thread_id, user_id, chat_input).await;
             return;
         }
 
@@ -2471,6 +1788,7 @@ async fn handle_update(
                 bot,
                 ai_service,
                 chat_id,
+                thread_id,
                 user_id,
                 ChatInput {
                     prompt: &prompt_video,
@@ -2496,7 +1814,7 @@ async fn handle_update(
                     "⚠️ <b>Gagal mengunduh video dari Telegram.</b>\n\n\
                      Telegram membatasi ukuran unduhan file bot maksimal <b>20MB</b>. Pastikan durasi atau ukuran video di bawah 20MB.",
                     Some("HTML"),
-                    Some(get_main_menu_keyboard()),
+                    None,
                     None,
                     None,
                 )
@@ -2504,397 +1822,81 @@ async fn handle_update(
             return;
         }
 
-        // Navigation Commands
+        // Navigation / Start
         if command_matches(&text, "/start") {
             send_welcome(bot, ai_service, chat_id, user_id).await;
-        } else if [
-            "📱 Menu",
-            "Menu",
-            "/menu",
-            "🔙 Menu Utama",
-            "🔙 Kembali ke Menu Utama",
-            "Menu Utama",
-            "Main Menu",
-            "main menu",
-            "Main menu",
-        ]
-        .contains(&text.as_str())
-        {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "ℹ️ <b>Antarmuka Chat Bersih:</b> Menu tombol telah ditiadakan. Anda dapat langsung mengirim pesan teks atau media untuk mengobrol.\n\nPerintah cepat:\n• <code>/clear</code> — Reset riwayat chat\n• <code>/new</code> — Sesi baru\n• <code>/help</code> — Bantuan",
-                    Some("HTML"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-        } else if command_matches(&text, "/new")
-            || ["New", "new", "➕ Chat Baru", "Chat Baru"].contains(&text.as_str())
-        {
-            let Some(new_session) = ai_service.create_new_session(user_id, None).await else {
-                let rich = InputRichMessage::new(vec![
-                    RichBlock::SectionHeading {
-                        text: Value::String("SESSION NOT CREATED".to_string()),
-                        level: 1,
-                    },
-                    RichBlock::BlockQuotation {
-                        blocks: vec![json!({
-                            "type":"paragraph",
-                            "text":"Persistence is unavailable. Xiao refuses to use a temporary session ID that could collide later."
-                        })],
-                    },
-                ]);
-                let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-                return;
-            };
-            let rich = InputRichMessage::new(vec![
-                RichBlock::SectionHeading {
-                    text: Value::String("NEW SESSION".to_string()),
-                    level: 1,
-                },
-                RichBlock::Paragraph {
-                    text: Value::String(format!(
-                        "✓ Session #{} created and activated.",
-                        new_session.id
-                    )),
-                },
-                RichBlock::Paragraph {
-                    text: Value::String("Canonical history is empty.".to_string()),
-                },
-            ]);
-            let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-        } else if command_matches(&text, "/session")
-            || ["Session", "session"].contains(&text.as_str())
-        {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "ℹ️ <b>Sesi Percakapan:</b> Gunakan <code>/new</code> untuk membuat sesi baru atau <code>/clear</code> untuk mereset riwayat sesi aktif.\nManajemen multi-sesi lengkap dikelola melalui database/CLI.",
-                    Some("HTML"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-        } else if command_matches(&text, "/context")
-            || [
-                "ᴄᴏɴᴛᴇxᴛ",
-                "🧠 ᴄᴏɴᴛᴇxᴛ",
-                "🧠 Context",
-                "Context",
-                "context",
-                "🧠 Info Konteks",
-                "Info Konteks",
-            ]
-            .contains(&text.as_str())
-        {
-            let _ = bot
-                .send_message(
-                    chat_id,
-                    "ℹ️ <b>Status & Konteks Sistem</b> dikelola melalui backend terminal.\nJalankan <code>xiao status</code> di CLI untuk melihat statistik lengkap.",
-                    Some("HTML"),
-                    None,
-                    None,
-                    None,
-                )
-                .await;
-        } else if command_matches(&text, "/image")
-            || [
-                "🫟 Buat Gambar",
-                "🫟 Generate Gambar",
-                "📸 Buat Gambar",
-                "🎨 Buat Gambar",
-                "Buat Gambar",
-            ]
-            .contains(&text.as_str())
-        {
-            let prompt_arg = command_args(&text, "/image").unwrap_or("");
-            let explicit_intent = if prompt_arg.is_empty() {
-                None
-            } else {
-                plan_image_generation_intent(prompt_arg)
-            };
-            let image_prompt = explicit_intent
-                .as_ref()
-                .map(|intent| intent.image_prompt.as_str())
-                .unwrap_or(prompt_arg);
-            let explanation_prompt = explicit_intent
-                .as_ref()
-                .and_then(|intent| intent.explanation_prompt.as_deref());
+            return;
+        }
+
+        let is_explicit_image = command_matches(&text, "/image");
+        let image_arg = if is_explicit_image {
+            command_args(&text, "/image").unwrap_or("")
+        } else {
+            &text
+        };
+
+        let auto_image_intent = if image_bytes.is_none() && doc_text.is_none() {
+            plan_image_generation_intent(image_arg).or_else(|| {
+                if is_explicit_image && !image_arg.trim().is_empty() {
+                    Some(ImageGenerationIntent {
+                        image_prompt: image_arg.trim().to_string(),
+                        explanation_prompt: None,
+                    })
+                } else {
+                    None
+                }
+            })
+        } else {
+            None
+        };
+
+        if let Some(intent) = auto_image_intent {
             handle_image_generation(
                 bot,
                 ai_service,
                 user_last_image_prompt,
                 chat_id,
+                thread_id,
                 user_id,
-                image_prompt,
-                explanation_prompt,
+                &intent.image_prompt,
+                intent.explanation_prompt.as_deref(),
             )
             .await;
-        } else if command_matches(&text, "/clear")
-            || ["🗑️ Reset Chat", "🗑️ Reset Obrolan"].contains(&text.as_str())
-        {
-            let rich = build_clear_confirmation_ui();
-            let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-        } else if command_matches(&text, "/help")
-            || ["📖 Bantuan", "📖 Bantuan & Info"].contains(&text.as_str())
-        {
-            let rich = build_help_ui();
-            let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
         } else {
-            let auto_image_intent = if image_bytes.is_none() && doc_text.is_none() {
-                plan_image_generation_intent(&text)
-            } else {
-                None
-            };
-
-            if let Some(intent) = auto_image_intent {
-                handle_image_generation(
-                    bot,
-                    ai_service,
-                    user_last_image_prompt,
-                    chat_id,
-                    user_id,
-                    &intent.image_prompt,
-                    intent.explanation_prompt.as_deref(),
-                )
-                .await;
-            } else {
-                handle_ai_chat(
-                    bot,
-                    ai_service,
-                    chat_id,
-                    user_id,
-                    ChatInput {
-                        prompt: &text,
-                        image_bytes,
-                        document_images,
-                        mime_type: mime_type.as_deref(),
-                        doc_text: doc_text.as_deref(),
-                        doc_name: doc_name.as_deref(),
-                        audio_bytes: None,
-                        audio_mime: None,
-                        video_bytes,
-                        video_mime: video_mime.as_deref(),
-                        video_duration: Some(video_duration),
-                        model_snapshot: None,
-                    },
-                )
-                .await;
-            }
+            handle_ai_chat(
+                bot,
+                ai_service,
+                chat_id,
+                thread_id,
+                user_id,
+                ChatInput {
+                    prompt: &text,
+                    image_bytes,
+                    document_images,
+                    mime_type: mime_type.as_deref(),
+                    doc_text: doc_text.as_deref(),
+                    doc_name: doc_name.as_deref(),
+                    audio_bytes: None,
+                    audio_mime: None,
+                    video_bytes,
+                    video_mime: video_mime.as_deref(),
+                    video_duration: Some(video_duration),
+                    model_snapshot: None,
+                },
+            )
+            .await;
         }
     } else if let Some(cq) = update.callback_query {
         let cq_id = cq.id;
-        let cq_data = cq.data.unwrap_or_default();
-        let user_id = cq.from.id;
-        let chat_id = cq.message.as_ref().map(|m| m.chat.id).unwrap_or(user_id);
-        if !access.allows(user_id, chat_id) {
-            let _ = bot
-                .answer_callback_query(&cq_id, Some("Aksi tidak diizinkan."), true)
-                .await;
-            return;
-        }
-        let msg_id = cq.message.as_ref().map(|m| m.message_id);
-
-        if cq_data == "noop" {
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            return;
-        }
-
-        // Provider lock on callbacks
-        if !ai_service.has_configured_provider(user_id).await {
-            let allowed_cqs = [
-                "provider_new",
-                "start_provider_wizard",
-                "provider_retry_endpoint",
-                "provider_retry_apikey",
-                "provider_skip_alias",
-                "provider_cancel",
-                "provider_set_model",
-                "set_m",
-                "provider_models",
-                "noop",
-            ];
-            if !allowed_cqs
-                .iter()
-                .any(|prefix| callback_prefix_matches(&cq_data, prefix))
-            {
-                let _ = bot
-                    .answer_callback_query(&cq_id, Some("🔒 Menu terkunci! Jalankan `xiao provider` di terminal terlebih dahulu."), true)
-                    .await;
-                return;
-            }
-        }
-
-        if cq_data == "session_new" || cq_data == "open_new_session" {
-            if let Some(new_session) = ai_service.create_new_session(user_id, None).await {
-                let _ = bot
-                    .answer_callback_query(
-                        &cq_id,
-                        Some(&format!("Sesi #{} dibuat! ✨", new_session.id)),
-                        false,
-                    )
-                    .await;
-                let _ = bot
-                    .send_message(
-                        chat_id,
-                        &format!(
-                            "✨ <b>Sesi Baru Berhasil Dibuat (#{})!</b>\nRiwayat obrolan baru bersih dan siap digunakan.",
-                            new_session.id
-                        ),
-                        Some("HTML"),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-            } else {
-                let _ = bot
-                    .answer_callback_query(&cq_id, Some("Gagal membuat sesi baru."), true)
-                    .await;
-            }
-        } else if cq_data.starts_with("session_") || cq_data == "open_session" {
-            if cq_data == "session_close" || cq_data == "provider_close" {
-                if let Some(mid) = msg_id {
-                    let _ = bot.delete_message(chat_id, mid).await;
-                }
-                let _ = bot
-                    .answer_callback_query(&cq_id, Some("Ditutup"), false)
-                    .await;
-            } else {
-                let _ = bot
-                    .answer_callback_query(
-                        &cq_id,
-                        Some("Manajemen sesi dialihkan ke CLI. Gunakan /new atau /clear."),
-                        false,
-                    )
-                    .await;
-            }
-        } else if cq_data == "action_help" {
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            let rich = build_help_ui();
-            if let Some(mid) = msg_id {
-                if bot
-                    .edit_rich_message(chat_id, mid, &rich, None)
-                    .await
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-            let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-        } else if cq_data == "clear_cancel" {
-            let _ = bot
-                .answer_callback_query(&cq_id, Some("Reset dibatalkan"), false)
-                .await;
-            if let Some(mid) = msg_id {
-                let _ = bot.delete_message(chat_id, mid).await;
-            }
-        } else if cq_data == "provider_cancel" {
-            ai_service.user_wizard_state.write().await.remove(&user_id);
-            let _ = bot
-                .answer_callback_query(&cq_id, Some("Aksi dibatalkan"), false)
-                .await;
-            if let Some(mid) = msg_id {
-                let _ = bot.delete_message(chat_id, mid).await;
-            }
-        } else if cq_data == "img_new" {
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            handle_image_generation(
-                bot,
-                ai_service,
-                user_last_image_prompt,
-                chat_id,
-                user_id,
-                "",
-                None,
+        let _ = bot
+            .answer_callback_query(
+                &cq_id,
+                Some("Xiao is now a pure conversational assistant."),
+                false,
             )
             .await;
-        } else if cq_data == "img_regen" {
-            let last_guard = user_last_image_prompt.read().await;
-            let last_p = last_guard
-                .get(&user_id)
-                .cloned()
-                .unwrap_or_else(|| "cyberpunk aesthetic landscape".to_string());
-            drop(last_guard);
-            let _ = bot
-                .answer_callback_query(&cq_id, Some("Membuat ulang gambar... 🫟"), false)
-                .await;
-            handle_image_generation(
-                bot,
-                ai_service,
-                user_last_image_prompt,
-                chat_id,
-                user_id,
-                &last_p,
-                None,
-            )
-            .await;
-        } else if cq_data == "context_refresh"
-            || cq_data == "open_context"
-            || cq_data == "show_context"
-        {
-            let _ = bot
-                .answer_callback_query(
-                    &cq_id,
-                    Some("Status konteks dimonitor melalui CLI (xiao status)."),
-                    false,
-                )
-                .await;
-        } else if cq_data == "context_close" {
-            let _ = bot.answer_callback_query(&cq_id, None, false).await;
-            if let Some(mid) = msg_id {
-                let _ = bot.delete_message(chat_id, mid).await;
-            }
-        } else if cq_data == "action_clear" {
-            let cleared = ai_service.clear_history(user_id).await;
-            let rich = if cleared {
-                InputRichMessage::new(vec![
-                    RichBlock::SectionHeading { text: Value::String("HISTORY RESET".to_string()), level: 1 },
-                    RichBlock::Paragraph { text: Value::String("Canonical history and attachment context were reset durably. The session remains. Older in-flight generations cannot write back because the session revision changed.".to_string()) },
-                ])
-            } else {
-                InputRichMessage::new(vec![
-                    RichBlock::SectionHeading {
-                        text: Value::String("RESET FAILED".to_string()),
-                        level: 1,
-                    },
-                    RichBlock::BlockQuotation {
-                        blocks: vec![
-                            json!({"type":"paragraph","text":"Persistence failed. Previous history and attachments were preserved."}),
-                        ],
-                    },
-                ])
-            };
-            let _ = bot.answer_callback_query(&cq_id, None, !cleared).await;
-            if let Some(mid) = msg_id {
-                if bot
-                    .edit_rich_message(chat_id, mid, &rich, None)
-                    .await
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-            let _ = bot.send_rich_message(chat_id, &rich, None, None).await;
-        } else if cq_data == "action_menu" {
-            let _ = bot
-                .answer_callback_query(
-                    &cq_id,
-                    Some("Menu telah disederhanakan. Kirim pesan langsung untuk mengobrol."),
-                    false,
-                )
-                .await;
-        } else {
-            let _ = bot
-                .answer_callback_query(
-                    &cq_id,
-                    Some("Aksi sudah kedaluwarsa. Buka menu lagi."),
-                    false,
-                )
-                .await;
+        if let Some(msg) = cq.message {
+            let _ = bot.delete_message(msg.chat.id, msg.message_id).await;
         }
     }
 }
@@ -2928,6 +1930,18 @@ async fn main() {
         }
         "status" => {
             run_cli_status(&ai_service).await;
+            return;
+        }
+        "context" => {
+            let chat_arg = args.get(2).and_then(|s| s.parse::<i64>().ok());
+            let thread_arg = args.get(3).and_then(|s| s.parse::<i64>().ok());
+            run_cli_context(&ai_service, chat_arg, thread_arg).await;
+            return;
+        }
+        "memory" => {
+            let action_arg = args.get(2).map(|s| s.as_str());
+            let target_arg = args.get(3).map(|s| s.as_str());
+            run_cli_memory(&ai_service, action_arg, target_arg).await;
             return;
         }
         "gateway" => {
@@ -3026,17 +2040,7 @@ async fn main() {
     }
 
     // Register Bot Commands
-    let commands = vec![
-        BotCommand::ephemeral("menu", "Buka menu navigasi bot"),
-        BotCommand::ephemeral("context", "Monitor penggunaan memori konteks model AI"),
-        BotCommand::ephemeral("image", "Buat gambar AI dari deskripsi teks"),
-        BotCommand::ephemeral("new", "Mulai chat baru & buka Session Manager"),
-        BotCommand::ephemeral("session", "Kelola daftar session obrolan"),
-        BotCommand::ephemeral("start", "Mulai bot & info provider"),
-        BotCommand::ephemeral("clear", "Reset riwayat percakapan chat"),
-        BotCommand::ephemeral("cancel", "Batalkan aksi interaktif aktif"),
-        BotCommand::ephemeral("help", "Daftar perintah dan panduan"),
-    ];
+    let commands = vec![BotCommand::ephemeral("start", "Start chatting with Xiao")];
 
     if let Err(e) = bot.set_my_commands(&commands).await {
         warn!("Gagal mendaftarkan bot commands: {e}");
@@ -3148,7 +2152,7 @@ async fn main() {
                 println!("\n🛑 Menerima sinyal berhenti. Bot dimatikan secara aman.");
                 break;
             }
-            updates_res = bot.get_updates(offset, 100, 20, Some(vec!["message".to_string(), "callback_query".to_string(), "stopped_message_generation".to_string()])) => {
+            updates_res = bot.get_updates(offset, 100, 20, Some(vec!["message".to_string(), "stopped_message_generation".to_string()])) => {
                 match updates_res {
                     Ok(resp) if resp.ok => {
                         if let Some(updates) = resp.result {
@@ -3239,16 +2243,7 @@ mod update_lane_tests {
 
     #[test]
     fn known_controls_do_not_share_generation_lane() {
-        for text in [
-            "/menu",
-            "/session",
-            "/context",
-            "/help",
-            "📱 Menu",
-            "Session",
-            "New",
-            "Clear",
-        ] {
+        for text in ["/start", "/start@xiaobot", "/start hello"] {
             assert!(is_control_message_text(text), "{text}");
         }
     }
@@ -3260,6 +2255,10 @@ mod update_lane_tests {
             "Jelaskan orbit satelit",
             "/image seekor rubah di kota neon",
             "buatkan gambar pemandangan",
+            "halo Xiao apa kabar?",
+            "/menu",
+            "/help",
+            "/clear",
         ] {
             assert!(!is_control_message_text(text), "{text}");
         }
@@ -3582,7 +2581,7 @@ mod update_lane_tests {
             .find("} else if let Some(doc) = msg.document {")
             .expect("Telegram document branch");
         let document_end = source[document_start..]
-            .find("\n        }\n\n        // Wizard state handler")
+            .find("\n        }\n\n        // Strict provider lock")
             .map(|offset| document_start + offset)
             .expect("Telegram document branch end");
         let document_branch = &source[document_start..document_end];

@@ -389,11 +389,20 @@ impl ReplyKeyboardMarkup {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ReplyKeyboardRemove {
     pub remove_keyboard: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selective: Option<bool>,
+}
+
+impl ReplyKeyboardRemove {
+    pub fn new() -> Self {
+        Self {
+            remove_keyboard: true,
+            selective: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
