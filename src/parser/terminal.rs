@@ -225,36 +225,7 @@ pub fn render_terminal_markdown(input: &str) -> String {
 }
 
 fn sanitize_terminal_input(input: &str) -> String {
-    let step1 = Regex::new(r"(?is)<think>.*?</think>")
-        .map(|r| r.replace_all(input, "").into_owned())
-        .unwrap_or_else(|_| input.to_string());
-    let step2 = Regex::new(r"(?is)<thought>.*?</thought>")
-        .map(|r| r.replace_all(&step1, "").into_owned())
-        .unwrap_or(step1);
-    let step3 = Regex::new(r"(?is)<reasoning>.*?</reasoning>")
-        .map(|r| r.replace_all(&step2, "").into_owned())
-        .unwrap_or(step2);
-    let step4 = Regex::new(r"(?is)<tool_call>.*?</tool_call>")
-        .map(|r| r.replace_all(&step3, "").into_owned())
-        .unwrap_or(step3);
-    let step5 = Regex::new(r"(?is)<function_calls?>.*?</function_calls?>")
-        .map(|r| r.replace_all(&step4, "").into_owned())
-        .unwrap_or(step4);
-
-    // Unclosed <think> or <thought>
-    let mut cleaned = step5;
-    for open_tag in ["<think>", "<thought>", "<reasoning>"] {
-        if let Some(pos) = cleaned.to_lowercase().find(open_tag) {
-            cleaned = cleaned[..pos].trim().to_string();
-        }
-    }
-
-    // Clean stray tags
-    if let Ok(re) = Regex::new(r"(?i)</?(?:think|thought|reasoning|tool_call|function_calls?)>") {
-        cleaned = re.replace_all(&cleaned, "").into_owned();
-    }
-
-    cleaned
+    super::markdown::sanitize_leaked_llm_artifacts(input)
 }
 
 pub fn render_terminal_inline(text: &str) -> String {
@@ -436,7 +407,66 @@ fn try_render_terminal_media(line: &str) -> Option<String> {
     let s = line.trim();
     let s_clean = s.trim_end_matches(['.', ',', ';', ':']);
 
-    // Map: [map: lat, lon] or [map: label](coords)
+    // 1. Telegram native document tag: <tg-document src="..." name="..."/>
+    if let Some(rest) = s.strip_prefix("<tg-document") {
+        let trimmed = rest.trim().trim_end_matches('>').trim_end_matches('/');
+        let link = trimmed
+            .split("src=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .or_else(|| {
+                trimmed
+                    .split("src='")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+            })
+            .unwrap_or("");
+        let name = trimmed
+            .split("name=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .or_else(|| {
+                trimmed
+                    .split("name='")
+                    .nth(1)
+                    .and_then(|s| s.split('\'').next())
+            })
+            .unwrap_or("");
+        let label = if name.is_empty() { "Dokumen" } else { name };
+        if !link.is_empty() {
+            return Some(format!(
+                "  \x1b[1;38;5;222m📄 [Dokumen: {label}]\x1b[0m \x1b[4;38;5;39m{link}\x1b[0m"
+            ));
+        }
+    }
+
+    // 2. Telegram native map tag: <tg-map lat="..." lon="..." title="..."/>
+    if let Some(rest) = s.strip_prefix("<tg-map") {
+        let trimmed = rest.trim().trim_end_matches('>').trim_end_matches('/');
+        let lat = trimmed
+            .split("lat=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        let lon = trimmed
+            .split("lon=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("");
+        let title = trimmed
+            .split("title=\"")
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .unwrap_or("Peta");
+        if !lat.is_empty() && !lon.is_empty() {
+            let map_url = format!("https://www.google.com/maps?q={lat},{lon}");
+            return Some(format!(
+                "  \x1b[1;38;5;203m📍 [Lokasi: {title}]\x1b[0m \x1b[4;38;5;39m{map_url}\x1b[0m"
+            ));
+        }
+    }
+
+    // 3. Map: [map: lat, lon] or [map: label](coords)
     let map_re = Regex::new(
         r#"(?i)^\[(?:map|location|lokasi|peta|geo)\s*:\s*([^\]]+)\](?:\s*\(([^)]+)\))?$"#,
     )
@@ -540,6 +570,18 @@ fn parse_table_cells(line: &str) -> Vec<String> {
         .collect()
 }
 
+fn strip_ansi_codes(s: &str) -> String {
+    if let Ok(re) = Regex::new(r"\x1b\[[0-9;]*[a-zA-Z]") {
+        re.replace_all(s, "").into_owned()
+    } else {
+        s.to_string()
+    }
+}
+
+fn visible_width(s: &str) -> usize {
+    strip_ansi_codes(s).chars().count()
+}
+
 fn render_terminal_table(rows: &[Vec<String>]) -> String {
     if rows.is_empty() {
         return String::new();
@@ -550,15 +592,35 @@ fn render_terminal_table(rows: &[Vec<String>]) -> String {
         return String::new();
     }
 
-    // Compute column widths based on display length (ignoring ANSI)
+    let max_col_width = 45usize;
+
+    // 1. Process and format cells, clipping raw text to max_col_width
+    let mut processed_rows: Vec<Vec<(String, usize)>> = Vec::new();
     let mut col_widths = vec![3usize; num_cols];
-    for row in rows {
-        for (col_idx, cell) in row.iter().enumerate() {
-            let len = cell.chars().count();
-            if len > col_widths[col_idx] {
-                col_widths[col_idx] = len.min(40); // Cap column width at 40
+
+    for (row_idx, row) in rows.iter().enumerate() {
+        let mut proc_row = Vec::new();
+        for (col_idx, width_ref) in col_widths.iter_mut().enumerate().take(num_cols) {
+            let raw = row.get(col_idx).map(|s| s.as_str()).unwrap_or("");
+            let clipped = if raw.chars().count() > max_col_width {
+                let mut c: String = raw.chars().take(max_col_width - 1).collect();
+                c.push('…');
+                c
+            } else {
+                raw.to_string()
+            };
+            let styled = if row_idx == 0 {
+                format!("\x1b[1;38;5;81m{clipped}\x1b[0m")
+            } else {
+                render_terminal_inline(&clipped)
+            };
+            let vis_w = visible_width(&styled);
+            if vis_w > *width_ref {
+                *width_ref = vis_w;
             }
+            proc_row.push((styled, vis_w));
         }
+        processed_rows.push(proc_row);
     }
 
     let mut out = Vec::new();
@@ -575,12 +637,11 @@ fn render_terminal_table(rows: &[Vec<String>]) -> String {
     out.push(top_border);
 
     // Header row
-    if let Some(header) = rows.first() {
+    if let Some(header) = processed_rows.first() {
         let mut row_cells = Vec::new();
         for (col_idx, &width) in col_widths.iter().enumerate() {
-            let cell = header.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-            let styled = format!("\x1b[1;38;5;81m{cell}\x1b[0m");
-            let pad = width.saturating_sub(cell.chars().count());
+            let (styled, vis_w) = header.get(col_idx).cloned().unwrap_or_default();
+            let pad = width.saturating_sub(vis_w);
             row_cells.push(format!(" {styled}{} ", " ".repeat(pad)));
         }
         out.push(format!(
@@ -601,12 +662,11 @@ fn render_terminal_table(rows: &[Vec<String>]) -> String {
     }
 
     // Data rows
-    for row in &rows[1..] {
+    for row in &processed_rows[1..] {
         let mut row_cells = Vec::new();
         for (col_idx, &width) in col_widths.iter().enumerate() {
-            let cell = row.get(col_idx).map(|s| s.as_str()).unwrap_or("");
-            let styled = render_terminal_inline(cell);
-            let pad = width.saturating_sub(cell.chars().count());
+            let (styled, vis_w) = row.get(col_idx).cloned().unwrap_or_default();
+            let pad = width.saturating_sub(vis_w);
             row_cells.push(format!(" {styled}{} ", " ".repeat(pad)));
         }
         out.push(format!(
@@ -679,5 +739,43 @@ mod tests {
         let output = render_terminal_markdown(input);
         assert!(!output.contains("Internal reasoning"));
         assert!(output.contains("Halo, ada yang bisa dibantu?"));
+    }
+
+    #[test]
+    fn strips_reflection_and_unclosed_reasoning_from_terminal_output() {
+        let input = "<reflection>\nInternal reflection here\n</reflection>\n<thought>\nUnclosed thought\nHalo dari model!";
+        let output = render_terminal_markdown(input);
+        assert!(!output.contains("Internal reflection"));
+        assert!(!output.contains("Unclosed thought"));
+    }
+
+    #[test]
+    fn renders_tg_document_and_tg_map_cards() {
+        let input = "<tg-document src=\"https://example.com/spec.pdf\" name=\"Spec Dokumen\"/>\n<tg-map lat=\"-6.2\" lon=\"106.8\" title=\"Monas\"/>";
+        let output = render_terminal_markdown(input);
+        assert!(output.contains("📄 [Dokumen: Spec Dokumen]"));
+        assert!(output.contains("https://example.com/spec.pdf"));
+        assert!(output.contains("📍 [Lokasi: Monas]"));
+        assert!(output.contains("maps?q=-6.2,106.8"));
+    }
+
+    #[test]
+    fn renders_table_with_bold_cells_without_border_misalignment() {
+        let input = "| Item | Keterangan |\n|---|---|\n| **Model Sangat Cepat** | Deskripsi singkat |\n| Normal | Keterangan lainnya |";
+        let output = render_terminal_markdown(input);
+        let lines: Vec<&str> = output.lines().collect();
+        assert!(lines.len() >= 5);
+        // Verify borders and rows match exact visible display width
+        let top_w = visible_width(lines[0]);
+        let header_w = visible_width(lines[1]);
+        let sep_w = visible_width(lines[2]);
+        let row1_w = visible_width(lines[3]);
+        let row2_w = visible_width(lines[4]);
+        let bot_w = visible_width(lines[5]);
+        assert_eq!(top_w, header_w);
+        assert_eq!(header_w, sep_w);
+        assert_eq!(sep_w, row1_w);
+        assert_eq!(row1_w, row2_w);
+        assert_eq!(row2_w, bot_w);
     }
 }

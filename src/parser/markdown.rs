@@ -657,7 +657,7 @@ fn try_parse_media_block(line: &str) -> Option<RichBlock> {
                             }
                             "voice" => {
                                 return Some(RichBlock::VoiceNote {
-                                    voice_note: json!({"type": "voice", "media": link}),
+                                    voice_note: json!({"type": "voice_note", "media": link}),
                                     caption,
                                 });
                             }
@@ -854,7 +854,7 @@ pub fn isolate_embedded_media_blocks(text: &str) -> String {
     output
 }
 
-fn sanitize_leaked_llm_artifacts(text: &str) -> String {
+pub fn sanitize_leaked_llm_artifacts(text: &str) -> String {
     // 1. Strip closed thinking / reflection blocks
     let step1 = Regex::new(r"(?is)<think>.*?</think>")
         .map(|r| r.replace_all(text, "").into_owned())
