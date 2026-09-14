@@ -67,12 +67,22 @@ The binary supports both interactive management and headless daemon modes:
 cargo run -- start               # Run the bot daemon in foreground (default subcommand)
 cargo run -- setup               # 2-step interactive configuration wizard (AI -> Telegram)
 cargo run -- status              # Display system, database, and provider status
+cargo run -- ai                  # Open interactive unified AI management hub
+cargo run -- ai use <model>      # Switch Main Model directly (or provider/model)
+cargo run -- ai list             # Print table of registered providers and models
+cargo run -- ai add              # Add a new OpenAI-compatible AI provider
+cargo run -- ai rm               # Remove an existing provider
+cargo run -- ai addon            # Configure multimodal specialist routes (Vision, Video, STT, Image)
+cargo run -- ai test             # Run live capability probe for active models
 cargo run -- gateway             # Manage Telegram Bot Token and OWNER_USER_ID
-cargo run -- provider [add|rm]   # Manage OpenAI-compatible AI providers
-cargo run -- model [query]       # Search and set Main Model
-cargo run -- addon               # Configure multimodal specialist routes (Vision, Video, STT, Image)
-cargo run -- probe               # Live capability diagnostic center and probe tester
+cargo run -- doctor              # Run health checks and diagnostics (alias: probe)
+cargo run -- version             # Print binary version (-v, --version)
 cargo run -- help                # Print CLI subcommand reference
+# Backward-compatibility aliases:
+# cargo run -- provider [add|rm] # Legacy alias for provider management
+# cargo run -- model [query]     # Legacy alias for model picker
+# cargo run -- addon             # Legacy alias for multimodal addons
+# cargo run -- probe             # Legacy alias for doctor
 ```
 
 ---
@@ -182,7 +192,7 @@ cargo run -- help                # Print CLI subcommand reference
 
 ### 7. 5-Role Multimodal Model Routing Rules
 - The 5 roles are `Main`, `Vision`, `Video`, `AudioStt`, and `ImageGeneration`.
-- Model configuration is managed purely through the CLI (`xiao model` for the Main Model and `xiao addon` for specialist roles). The Telegram interface remains a focused chat gateway without in-app `/model` command widgets.
+- Model configuration is managed purely through the CLI (`xiao ai` / `xiao model` for the Main Model and `xiao ai addon` / `xiao addon` for specialist roles). The Telegram interface remains a focused chat gateway without in-app `/model` command widgets.
 - An addon route configured as `MainModel` dynamically tracks changes to the Main Model. An addon configured as `Specific` or `Disabled` is never overwritten when the Main Model changes.
 - Specialist invocations send only the immediate user input and relevant media to the specialist model; they do not send canonical session history to the specialist. Canonical history is maintained solely with the Main Model.
 

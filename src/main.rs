@@ -2912,6 +2912,16 @@ async fn main() {
     let ai_service = Arc::new(AIChatService::new());
 
     match subcommand {
+        "-v" | "--version" | "version" => {
+            println!("xiao v{}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        "ai" => {
+            let action_arg = args.get(2).map(|s| s.as_str());
+            let target_arg = args.get(3).map(|s| s.as_str());
+            run_cli_ai_hub(&ai_service, action_arg, target_arg).await;
+            return;
+        }
         "setup" => {
             let _ = run_cli_quickstart_wizard(&ai_service).await;
             return;
@@ -2922,6 +2932,10 @@ async fn main() {
         }
         "gateway" => {
             run_cli_gateway_menu().await;
+            return;
+        }
+        "doctor" | "probe" => {
+            run_cli_probe_menu(&ai_service).await;
             return;
         }
         "provider" => {
@@ -2940,10 +2954,6 @@ async fn main() {
         }
         "addon" => {
             run_cli_addon_menu(&ai_service).await;
-            return;
-        }
-        "probe" => {
-            run_cli_probe_menu(&ai_service).await;
             return;
         }
         "help" | "--help" | "-h" => {

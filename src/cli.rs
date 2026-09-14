@@ -20,6 +20,7 @@ use crate::ai::service::{
     load_provider_store, save_provider_store, CapabilityKind, CapabilityState, ModelRole,
     ModelRoute, ProbeEvent, ProbeOutcome, ProviderConfig,
 };
+use crate::ai::storage::ProviderStore;
 
 struct CleanRawMode;
 impl CleanRawMode {
@@ -1794,7 +1795,7 @@ fn format_cap_bool_badge(val: Option<bool>) -> &'static str {
     }
 }
 
-async fn run_cli_probe_all_active(ai_service: &AIChatService) {
+pub(crate) async fn run_cli_probe_all_active(ai_service: &AIChatService) {
     println!("\n\x1b[1;36mMemeriksa Kapabilitas Model Aktif...\x1b[0m\n");
     let providers = ai_service.get_user_providers(0).await;
     if providers.is_empty() {
@@ -2038,19 +2039,465 @@ async fn run_persisted_capability_probe(
     }
 }
 
+fn find_matching_model_in_provider(prov: &ProviderConfig, query: &str) -> Option<String> {
+    if let Some(m) = prov.models.iter().find(|m| *m == query) {
+        return Some(m.clone());
+    }
+    if let Some(m) = prov.models.iter().find(|m| m.eq_ignore_ascii_case(query)) {
+        return Some(m.clone());
+    }
+    if prov.active_model.eq_ignore_ascii_case(query) && !prov.active_model.trim().is_empty() {
+        return Some(prov.active_model.clone());
+    }
+    None
+}
+
+pub(crate) fn find_model_in_store<'a>(
+    store: &'a ProviderStore,
+    target: &str,
+) -> Option<(&'a ProviderConfig, String)> {
+    let target = target.trim();
+    if target.is_empty() {
+        return None;
+    }
+
+    if let Some((prov_query, model_query)) = target.split_once('/') {
+        let prov_query = prov_query.trim();
+        let model_query = model_query.trim();
+
+        let matched_prov = store
+            .providers
+            .iter()
+            .find(|p| p.id == prov_query || p.name == prov_query)
+            .or_else(|| {
+                store.providers.iter().find(|p| {
+                    p.id.eq_ignore_ascii_case(prov_query) || p.name.eq_ignore_ascii_case(prov_query)
+                })
+            });
+
+        if let Some(prov) = matched_prov {
+            if let Some(m) = find_matching_model_in_provider(prov, model_query) {
+                return Some((prov, m));
+            }
+        }
+    }
+
+    let active_prov = store
+        .active_id
+        .as_deref()
+        .and_then(|aid| store.providers.iter().find(|p| p.id == aid))
+        .or_else(|| store.providers.first());
+
+    if let Some(prov) = active_prov {
+        if let Some(m) = find_matching_model_in_provider(prov, target) {
+            return Some((prov, m));
+        }
+    }
+
+    let active_prov_id = active_prov.map(|p| p.id.as_str()).unwrap_or("");
+    for prov in &store.providers {
+        if prov.id == active_prov_id {
+            continue;
+        }
+        if let Some(m) = find_matching_model_in_provider(prov, target) {
+            return Some((prov, m));
+        }
+    }
+
+    None
+}
+
+pub(crate) async fn run_cli_ai_hub(
+    ai_service: &AIChatService,
+    action: Option<&str>,
+    target: Option<&str>,
+) {
+    load_environment();
+    match action {
+        None => loop {
+            let store = load_provider_store();
+            let routing = ai_service.model_routing_config().await;
+
+            let active_provider = if let Some(ref aid) = store.active_id {
+                store.providers.iter().find(|p| &p.id == aid)
+            } else {
+                store.providers.first()
+            };
+
+            let (active_prov_name, active_model_name) = match active_provider {
+                Some(p) => (
+                    p.name.as_str(),
+                    if p.active_model.trim().is_empty() {
+                        "Belum diset"
+                    } else {
+                        p.active_model.as_str()
+                    },
+                ),
+                None => ("Belum ada", "Belum diset"),
+            };
+
+            let total_providers = store.providers.len();
+
+            let mut addon_parts = Vec::new();
+            for role in ModelRole::addon_roles() {
+                let route = routing
+                    .route(role)
+                    .cloned()
+                    .unwrap_or(ModelRoute::MainModel);
+                let route_desc = match &route {
+                    ModelRoute::MainModel => "Main".to_string(),
+                    ModelRoute::Disabled => "Off".to_string(),
+                    ModelRoute::Specific { model, .. } => model.clone(),
+                };
+                let label = match role {
+                    ModelRole::Vision => "Vision",
+                    ModelRole::Video => "Video",
+                    ModelRole::AudioStt => "STT",
+                    ModelRole::ImageGeneration => "Image",
+                    _ => role.display_name(),
+                };
+                addon_parts.push(format!("{label}: {route_desc}"));
+            }
+            let addon_summary = addon_parts.join(" | ");
+
+            let title = format!(
+                "== Xiao AI Management Hub ==\r\n\
+                     • Active Model   : {}\r\n\
+                     • Active Provider: {} (Total: {})\r\n\
+                     • Addon Routes   : {}",
+                active_model_name, active_prov_name, total_providers, addon_summary
+            );
+
+            let menu_items = vec![
+                "🎯 Select / Switch Main Model".to_string(),
+                "🔌 Manage Providers (Add / Remove / Switch)".to_string(),
+                "🧩 Manage Multimodal Addons (Vision, STT, Video, Image)".to_string(),
+                "🧪 Run AI Diagnostics (Live Probe)".to_string(),
+                "✕ Exit".to_string(),
+            ];
+
+            let sel = terminal_interactive_select(&title, &menu_items, 0, false, None);
+            let Some(idx) = sel else {
+                break;
+            };
+
+            match idx {
+                0 => {
+                    run_cli_model_picker(ai_service, None).await;
+                }
+                1 => {
+                    run_cli_provider_menu(ai_service, None).await;
+                }
+                2 => {
+                    run_cli_addon_menu(ai_service).await;
+                }
+                3 => {
+                    run_cli_probe_all_active(ai_service).await;
+                    print_press_enter();
+                }
+                _ => break,
+            }
+        },
+        Some("use") => {
+            let target = match target {
+                Some(t) if !t.trim().is_empty() => t.trim(),
+                _ => {
+                    run_cli_model_picker(ai_service, None).await;
+                    return;
+                }
+            };
+
+            let mut store = load_provider_store();
+            if let Some((matched_provider, matched_model)) = find_model_in_store(&store, target) {
+                let prov_id = matched_provider.id.clone();
+                let prov_name = matched_provider.name.clone();
+                let prov_endpoint = matched_provider.endpoint.clone();
+                let model_name = matched_model;
+
+                store.active_id = Some(prov_id.clone());
+                if let Some(p) = store.providers.iter_mut().find(|p| p.id == prov_id) {
+                    p.active_model = model_name.clone();
+                }
+
+                if let Err(e) = save_provider_store(&store) {
+                    println!("\x1b[31m✖ Error: Gagal menyimpan konfigurasi provider: {e}\x1b[0m");
+                    return;
+                }
+
+                if !ai_service.reload_provider_store().await {
+                    println!("\x1b[31m✖ Error: Gagal memuat ulang provider di runtime.\x1b[0m");
+                    return;
+                }
+
+                println!(
+                    "\x1b[32m✔\x1b[0m Main Model successfully switched to: \x1b[1m{}\x1b[0m",
+                    model_name
+                );
+                println!("  • Provider : {} ({})", prov_name, prov_endpoint);
+            } else {
+                println!(
+                    "\x1b[31m✖\x1b[0m Model '{}' not found in any registered provider.",
+                    target
+                );
+                println!("  Run 'xiao ai list' to see available models or 'xiao ai add' to register a new provider.");
+            }
+        }
+        Some("list") => {
+            let store = load_provider_store();
+            if store.providers.is_empty() {
+                println!("\n\x1b[33mBelum ada AI Provider yang terdaftar.\x1b[0m");
+                println!("  Jalankan 'xiao ai add' untuk menambahkan provider baru.\n");
+                return;
+            }
+
+            let active_id = store.active_id.as_deref().unwrap_or("");
+            let rows: Vec<(String, String, String, String, bool)> = store
+                .providers
+                .iter()
+                .map(|p| {
+                    let is_active = if active_id.is_empty() {
+                        store
+                            .providers
+                            .first()
+                            .map(|fp| fp.id == p.id)
+                            .unwrap_or(false)
+                    } else {
+                        p.id == active_id
+                    };
+                    let status = if is_active {
+                        "[ACTIVE]".to_string()
+                    } else {
+                        "INACTIVE".to_string()
+                    };
+                    let active_model = if p.active_model.trim().is_empty() {
+                        "-".to_string()
+                    } else {
+                        p.active_model.clone()
+                    };
+                    (
+                        p.name.clone(),
+                        active_model,
+                        p.models.len().to_string(),
+                        status,
+                        is_active,
+                    )
+                })
+                .collect();
+
+            let col_prov = rows
+                .iter()
+                .map(|r| r.0.len())
+                .max()
+                .unwrap_or(8)
+                .max("PROVIDER".len());
+            let col_model = rows
+                .iter()
+                .map(|r| r.1.len())
+                .max()
+                .unwrap_or(12)
+                .max("ACTIVE MODEL".len());
+            let col_total = rows
+                .iter()
+                .map(|r| r.2.len())
+                .max()
+                .unwrap_or(12)
+                .max("TOTAL MODELS".len());
+            let col_status = "STATUS".len().max(8);
+
+            println!(
+                "\n\x1b[1;37m{:<w_prov$}  {:<w_model$}  {:>w_total$}  {:<w_status$}\x1b[0m",
+                "PROVIDER",
+                "ACTIVE MODEL",
+                "TOTAL MODELS",
+                "STATUS",
+                w_prov = col_prov,
+                w_model = col_model,
+                w_total = col_total,
+                w_status = col_status,
+            );
+            let total_width = col_prov + col_model + col_total + col_status + 6;
+            println!("\x1b[38;5;238m{}\x1b[0m", "─".repeat(total_width));
+
+            for (prov, model, total, status, is_active) in rows {
+                let status_styled = if is_active {
+                    format!(
+                        "\x1b[1;32m{:<w_status$}\x1b[0m",
+                        status,
+                        w_status = col_status
+                    )
+                } else {
+                    format!(
+                        "\x1b[38;5;244m{:<w_status$}\x1b[0m",
+                        status,
+                        w_status = col_status
+                    )
+                };
+                println!(
+                    "{:<w_prov$}  {:<w_model$}  {:>w_total$}  {}",
+                    prov,
+                    model,
+                    total,
+                    status_styled,
+                    w_prov = col_prov,
+                    w_model = col_model,
+                    w_total = col_total,
+                );
+            }
+
+            println!("\nUse 'xiao ai use <model>' to switch models. Use 'xiao ai add' to add a provider.\n");
+        }
+        Some("add") => {
+            run_cli_provider_add(ai_service).await;
+        }
+        Some("rm") | Some("remove") => {
+            run_cli_provider_remove(ai_service).await;
+        }
+        Some("addon") | Some("addons") => {
+            run_cli_addon_menu(ai_service).await;
+        }
+        Some("test") | Some("probe") => {
+            run_cli_probe_all_active(ai_service).await;
+        }
+        Some("help") | Some("--help") | Some("-h") => {
+            println!("\n\x1b[1;36mxiao ai — Unified AI Management Hub\x1b[0m\n");
+            println!("\x1b[1;37mUsage:\x1b[0m");
+            println!("  xiao ai [action]\n");
+            println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
+            println!("  \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
+            println!("  \x1b[36mxiao ai use <model>\x1b[0m Switch Main Model directly");
+            println!("  \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models");
+            println!(
+                "  \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider"
+            );
+            println!("  \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
+            println!("  \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
+            println!("  \x1b[36mxiao ai test\x1b[0m        Run live diagnostic probe for active models\n");
+        }
+        Some(unknown) => {
+            println!("\x1b[31m✖ Error: Sub-perintah 'ai {unknown}' tidak dikenal.\x1b[0m");
+            println!("  Jalankan 'xiao ai help' atau 'xiao help' untuk bantuan.");
+        }
+    }
+}
+
 pub(crate) fn print_cli_help() {
-    println!("\n\x1b[1;36mxiao v0.3.0 — AI Assistant Bot\x1b[0m\n");
-    println!("\x1b[1;37mPenggunaan:\x1b[0m");
-    println!("  xiao <command>\n");
-    println!("\x1b[1;37mDaftar Perintah:\x1b[0m");
-    println!("  \x1b[36mstart\x1b[0m               Jalankan bot daemon");
     println!(
-        "  \x1b[36msetup\x1b[0m               Wizard konfigurasi awal (AI Provider ➔ Gateway)"
+        "\n\x1b[1;36mxiao v{} — AI Assistant Bot\x1b[0m\n",
+        env!("CARGO_PKG_VERSION")
     );
-    println!("  \x1b[36mstatus\x1b[0m              Tampilkan dashboard status sistem lengkap\n");
-    println!("  \x1b[36mgateway\x1b[0m             Kelola gateway chat (Telegram token & owner) [Interaktif]");
-    println!("  \x1b[36mprovider [add|rm]\x1b[0m   Kelola provider AI (list, tambah, hapus)     [Interaktif]\n");
-    println!("  \x1b[36mmodel [query|addon]\x1b[0m Pilih Main Model atau kelola Addon Multimodal [Interaktif]");
-    println!("  \x1b[36mprobe\x1b[0m               Pusat diagnostik kapabilitas & live test    [Interaktif]");
-    println!("  \x1b[36mhelp\x1b[0m                Tampilkan panduan perintah ini\n");
+    println!("\x1b[1;37mUsage:\x1b[0m");
+    println!("  xiao <command>\n");
+    println!("\x1b[1;37mCommands:\x1b[0m");
+    println!("  \x1b[36mstart\x1b[0m               Run bot daemon (default)");
+    println!(
+        "  \x1b[36msetup\x1b[0m               Interactive initial setup wizard (AI -> Telegram)"
+    );
+    println!("  \x1b[36mstatus\x1b[0m              Display system, database, and provider status dashboard");
+    println!("  \x1b[36mai [action]\x1b[0m         Unified AI management hub (Model, Provider, Addon) [Interactive/One-Liner]");
+    println!("  \x1b[36mgateway\x1b[0m             Manage Telegram messaging gateway (Token & Owner ID) [Interactive]");
+    println!("  \x1b[36mdoctor\x1b[0m              Run system health checks and model capability diagnostics");
+    println!("  \x1b[36mversion, -v\x1b[0m         Display binary version");
+    println!("  \x1b[36mhelp\x1b[0m                Show this help message\n");
+    println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
+    println!("  \x1b[36mxiao ai\x1b[0m             Open Interactive AI Center Hub");
+    println!("  \x1b[36mxiao ai use <model>\x1b[0m Switch Main Model directly");
+    println!("  \x1b[36mxiao ai list\x1b[0m        Print table of registered providers and models");
+    println!("  \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider");
+    println!("  \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
+    println!("  \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
+    println!("  \x1b[36mxiao ai test\x1b[0m        Run live diagnostic probe for active models\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_model_in_store_exact_and_cross_provider() {
+        let store = ProviderStore {
+            active_id: Some("groq-1".to_string()),
+            providers: vec![
+                ProviderConfig {
+                    id: "groq-1".to_string(),
+                    name: "Groq".to_string(),
+                    endpoint: "https://api.groq.com/openai/v1".to_string(),
+                    api_key: "".to_string(),
+                    api_key_ref: None,
+                    models: vec![
+                        "llama-3.3-70b-versatile".to_string(),
+                        "llama-3.1-8b-instant".to_string(),
+                    ],
+                    active_model: "llama-3.3-70b-versatile".to_string(),
+                },
+                ProviderConfig {
+                    id: "openai-1".to_string(),
+                    name: "OpenAI".to_string(),
+                    endpoint: "https://api.openai.com/v1".to_string(),
+                    api_key: "".to_string(),
+                    api_key_ref: None,
+                    models: vec![
+                        "gpt-4o".to_string(),
+                        "gpt-4o-mini".to_string(),
+                        "meta-llama/llama-3.1-8b-instruct".to_string(),
+                    ],
+                    active_model: "gpt-4o".to_string(),
+                },
+            ],
+        };
+
+        // Match in active provider
+        let res = find_model_in_store(&store, "llama-3.1-8b-instant");
+        assert!(res.is_some());
+        let (p, m) = res.unwrap();
+        assert_eq!(p.id, "groq-1");
+        assert_eq!(m, "llama-3.1-8b-instant");
+
+        // Model name containing a slash when prefix is not a provider
+        let res = find_model_in_store(&store, "meta-llama/llama-3.1-8b-instruct");
+        assert!(res.is_some());
+        let (p, m) = res.unwrap();
+        assert_eq!(p.id, "openai-1");
+        assert_eq!(m, "meta-llama/llama-3.1-8b-instruct");
+
+        // Match across other provider
+        let res = find_model_in_store(&store, "gpt-4o-mini");
+        assert!(res.is_some());
+        let (p, m) = res.unwrap();
+        assert_eq!(p.id, "openai-1");
+        assert_eq!(m, "gpt-4o-mini");
+
+        // Case-insensitive match across provider
+        let res = find_model_in_store(&store, "GPT-4O-MINI");
+        assert!(res.is_some());
+        let (p, m) = res.unwrap();
+        assert_eq!(p.id, "openai-1");
+        assert_eq!(m, "gpt-4o-mini");
+
+        // Delimited provider/model match with name
+        let res = find_model_in_store(&store, "openai/gpt-4o");
+        assert!(res.is_some());
+        let (p, m) = res.unwrap();
+        assert_eq!(p.id, "openai-1");
+        assert_eq!(m, "gpt-4o");
+
+        // Delimited provider/model match with ID
+        let res = find_model_in_store(&store, "groq-1/llama-3.1-8b-instant");
+        assert!(res.is_some());
+        let (p, m) = res.unwrap();
+        assert_eq!(p.id, "groq-1");
+        assert_eq!(m, "llama-3.1-8b-instant");
+
+        // Delimited with non-existent model in that provider
+        let res = find_model_in_store(&store, "groq/gpt-4o");
+        assert!(res.is_none());
+
+        // Model not found anywhere
+        let res = find_model_in_store(&store, "claude-3-5-sonnet");
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn print_cli_help_executes() {
+        print_cli_help();
+    }
 }
