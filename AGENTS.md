@@ -111,9 +111,9 @@ cargo run -- help                # Print CLI subcommand reference
                                          │
           ┌──────────────────────────────┼──────────────────────────────┐
           │                              │                              │
-     Bot Commands                 AI Chat Route                  /image Prompt
-    (/start, /help,             (Text & Multimodal)           (Text-to-Image Flow)
-   /clear, /new, etc.)                   │                              │
+     Bot Command                   AI Chat Route                  Natural /image
+       (/start)                 (Text & Multimodal)            (Text-to-Image Flow)
+          │                              │                              │
           │                              ▼                              ▼
           │                     AIChatService Core              Image Generation
           │                      ├── Session Lock                      │
@@ -137,7 +137,7 @@ cargo run -- help                # Print CLI subcommand reference
   - `url_policy.rs`: SSRF protection, IP address resolution, and egress sanitization for media downloads.
 - **`src/ai/`**: AI engine and backend integration.
   - `service.rs`: `AIChatService` managing session lifecycle, generation locks, SSE stream accumulation, audio formats, and image generation.
-  - `routing.rs`: 5-role model routing (`Main`, `Vision`, `Video`, `AudioStt`, `ImageGeneration`) and snapshot generation.
+  - `routing.rs`: 6-role model routing (`Main`, `Vision`, `Video`, `AudioStt`, `ImageGeneration`, `Curator`) and snapshot generation.
   - `storage.rs`: SQLite persistence, migrations, schema definition, secret reference manager, and update queue operations.
   - `provider.rs`: OpenAI-compatible HTTP payloads, multi-modal part assembly, and capability probe execution.
   - `capability.rs`: Model capability heuristic catalog, metadata enrichment, and token limits.

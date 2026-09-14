@@ -2902,6 +2902,9 @@ impl AIChatService {
             attachment_refs.clone(),
         );
         let user_content_str = serde_json::to_string(&user_message_content).unwrap_or_default();
+        if cancelled {
+            return (thinking_text, answer_text, true);
+        }
         let assistant_content_str = answer_text.clone();
 
         save_scoped_message_async(
@@ -3127,10 +3130,19 @@ impl AIChatService {
             };
             turns_text.push_str(&format!("{}: {}\n", m.role, truncate_chars(preview, 200)));
         }
+        let existing_summary = get_scoped_summary_async(chat_id, thread_id).await;
+        let mut context_text = String::new();
+        if let Some(ref prev) = existing_summary {
+            context_text.push_str(&format!(
+                "Previous summary of earlier discussion:\n{prev}\n\n"
+            ));
+        }
+        context_text.push_str(&format!("Recent conversation turns:\n{turns_text}\n\n"));
+
         let url = provider_url(&provider.endpoint, "chat/completions");
         let summary_prompt = format!(
-            "Past conversation history:\n{}\n\nSummarize the ongoing context, key discussions, and decisions in 2-3 concise sentences. Output only the plain summary.",
-            truncate_chars(&turns_text, 3000)
+            "{}Update and condense the ongoing context, key discussions, and decisions in 2-3 concise sentences. Output only the plain summary.",
+            truncate_chars(&context_text, 3500)
         );
         let payload = json!({
             "model": model,

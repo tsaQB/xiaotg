@@ -268,24 +268,24 @@ fn build_help_ui() -> InputRichMessage {
     ];
     let command_rows = vec![
         vec![
-            RichBlockTableCell::text_only("Command", true, Some("left")),
+            RichBlockTableCell::text_only("Command / Input", true, Some("left")),
             RichBlockTableCell::text_only("Action", true, Some("left")),
         ],
         vec![
-            RichBlockTableCell::text_only("/clear", false, Some("left")),
-            RichBlockTableCell::text_only("Reset active chat history", false, Some("left")),
+            RichBlockTableCell::text_only("/start", false, Some("left")),
+            RichBlockTableCell::text_only(
+                "Show assistant status & welcome card",
+                false,
+                Some("left"),
+            ),
         ],
         vec![
-            RichBlockTableCell::text_only("/new", false, Some("left")),
-            RichBlockTableCell::text_only("Start a new chat session", false, Some("left")),
-        ],
-        vec![
-            RichBlockTableCell::text_only("/image", false, Some("left")),
-            RichBlockTableCell::text_only("Generate an image from text", false, Some("left")),
-        ],
-        vec![
-            RichBlockTableCell::text_only("/help", false, Some("left")),
-            RichBlockTableCell::text_only("Show this help", false, Some("left")),
+            RichBlockTableCell::text_only("Chat & Media", false, Some("left")),
+            RichBlockTableCell::text_only(
+                "Natural conversation, image generation, audio & document analysis",
+                false,
+                Some("left"),
+            ),
         ],
     ];
     InputRichMessage::new(vec![
@@ -1238,7 +1238,7 @@ async fn handle_ai_chat(
         video_duration,
     };
     let generation_start = std::time::Instant::now();
-    let (_thinking, mut answer_text, _cancelled) = if let Some(snapshot) = model_snapshot {
+    let (_thinking, mut answer_text, cancelled) = if let Some(snapshot) = model_snapshot {
         ai_service
             .generate_response_with_snapshot(
                 chat_id,
@@ -1263,6 +1263,9 @@ async fn handle_ai_chat(
 
     ai_service.end_generation(chat_id, draft_id).await;
     timeline.stop_ticker();
+    if cancelled {
+        return;
+    }
     let elapsed_secs = generation_start.elapsed().as_secs_f64();
     let emoji = if elapsed_secs <= 10.0 {
         "⚡"
