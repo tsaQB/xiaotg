@@ -2192,8 +2192,7 @@ pub(crate) async fn run_cli_ai_hub(
                     run_cli_addon_menu(ai_service).await;
                 }
                 3 => {
-                    run_cli_probe_all_active(ai_service).await;
-                    print_press_enter();
+                    run_cli_probe_menu(ai_service).await;
                 }
                 _ => break,
             }
@@ -2355,9 +2354,31 @@ pub(crate) async fn run_cli_ai_hub(
         Some("addon") | Some("addons") => {
             run_cli_addon_menu(ai_service).await;
         }
-        Some("test") | Some("probe") => {
-            run_cli_probe_all_active(ai_service).await;
-        }
+        Some("test") | Some("probe") => match target {
+            Some("all") => {
+                run_cli_probe_all_active(ai_service).await;
+                print_press_enter();
+            }
+            Some("vision") => {
+                run_cli_probe_test_role(ai_service, ModelRole::Vision).await;
+                print_press_enter();
+            }
+            Some("video") => {
+                run_cli_probe_test_role(ai_service, ModelRole::Video).await;
+                print_press_enter();
+            }
+            Some("stt") | Some("audio") => {
+                run_cli_probe_test_role(ai_service, ModelRole::AudioStt).await;
+                print_press_enter();
+            }
+            Some("image") | Some("img") => {
+                run_cli_probe_test_image_gen(ai_service).await;
+                print_press_enter();
+            }
+            _ => {
+                run_cli_probe_menu(ai_service).await;
+            }
+        },
         Some("help") | Some("--help") | Some("-h") => {
             println!("\n\x1b[1;36mxiao ai — Unified AI Management Hub\x1b[0m\n");
             println!("\x1b[1;37mUsage:\x1b[0m");
@@ -2371,7 +2392,7 @@ pub(crate) async fn run_cli_ai_hub(
             );
             println!("  \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
             println!("  \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
-            println!("  \x1b[36mxiao ai test\x1b[0m        Run live diagnostic probe for active models\n");
+            println!("  \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
         }
         Some(unknown) => {
             println!("\x1b[31m✖ Error: Sub-perintah 'ai {unknown}' tidak dikenal.\x1b[0m");
@@ -2395,7 +2416,6 @@ pub(crate) fn print_cli_help() {
     println!("  \x1b[36mstatus\x1b[0m              Display system, database, and provider status dashboard");
     println!("  \x1b[36mai [action]\x1b[0m         Unified AI management hub (Model, Provider, Addon) [Interactive/One-Liner]");
     println!("  \x1b[36mgateway\x1b[0m             Manage Telegram messaging gateway (Token & Owner ID) [Interactive]");
-    println!("  \x1b[36mdoctor\x1b[0m              Run system health checks and model capability diagnostics");
     println!("  \x1b[36mversion, -v\x1b[0m         Display binary version");
     println!("  \x1b[36mhelp\x1b[0m                Show this help message\n");
     println!("\x1b[1;37mSubcommands for 'ai':\x1b[0m");
@@ -2405,7 +2425,7 @@ pub(crate) fn print_cli_help() {
     println!("  \x1b[36mxiao ai add\x1b[0m         Add a new OpenAI-compatible AI provider");
     println!("  \x1b[36mxiao ai rm\x1b[0m          Remove an existing provider");
     println!("  \x1b[36mxiao ai addon\x1b[0m       Configure multimodal specialist routes (Vision, STT, Video, Image)");
-    println!("  \x1b[36mxiao ai test\x1b[0m        Run live diagnostic probe for active models\n");
+    println!("  \x1b[36mxiao ai test [role]\x1b[0m Open live diagnostic probe center (or test: vision, stt, video, image, all)\n");
 }
 
 #[cfg(test)]

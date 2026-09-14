@@ -73,16 +73,15 @@ cargo run -- ai list             # Print table of registered providers and model
 cargo run -- ai add              # Add a new OpenAI-compatible AI provider
 cargo run -- ai rm               # Remove an existing provider
 cargo run -- ai addon            # Configure multimodal specialist routes (Vision, Video, STT, Image)
-cargo run -- ai test             # Run live capability probe for active models
+cargo run -- ai test             # Open live diagnostic probe center (or test: vision, stt, video, image, all)
 cargo run -- gateway             # Manage Telegram Bot Token and OWNER_USER_ID
-cargo run -- doctor              # Run health checks and diagnostics (alias: probe)
 cargo run -- version             # Print binary version (-v, --version)
 cargo run -- help                # Print CLI subcommand reference
 # Backward-compatibility aliases:
 # cargo run -- provider [add|rm] # Legacy alias for provider management
 # cargo run -- model [query]     # Legacy alias for model picker
 # cargo run -- addon             # Legacy alias for multimodal addons
-# cargo run -- probe             # Legacy alias for doctor
+# cargo run -- doctor / probe    # Legacy alias for capability probe
 ```
 
 ---
