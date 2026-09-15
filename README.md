@@ -119,15 +119,18 @@ xiao chat [prompt]  # Buka chat interaktif langsung di terminal atau one-shot pr
 xiao setup          # Wizard interaktif 2 tahap (Provider AI ➔ Gateway Telegram)
 xiao status         # Dashboard status sistem lengkap & ringkas
 
-# Konfigurasi Interaktif (TUI)
-xiao gateway        # Kelola gateway Telegram (Token & Owner ID)
-xiao provider       # Kelola daftar provider AI (List, Tambah, Hapus, Switch)
-xiao model [query]  # Pilih atau cari Main Model via pencarian langsung
-xiao addon          # Atur delegasi spesialis multimodal (Vision/Audio/Video/Gen)
-xiao probe          # Pusat diagnostik kapabilitas, audit cache & live testing
+# Konfigurasi Gateway & Akses
+xiao gateway                  # Kelola gateway Telegram (Token & Owner ID)
+xiao gateway mode [single|public] # Ganti mode akses (Single-Owner vs Public AI Chat)
+xiao gateway quota [LIMIT]    # Atur batas kuota harian user publik (reset 00:00)
+xiao gateway usage            # Pantau rekap penggunaan kuota publik hari ini
+xiao provider                 # Kelola daftar provider AI (List, Tambah, Hapus, Switch)
+xiao model [query]            # Pilih atau cari Main Model via pencarian langsung
+xiao addon                    # Atur delegasi spesialis multimodal (Vision/Audio/Video/Gen)
+xiao probe                    # Pusat diagnostik kapabilitas, audit cache & live testing
 
 # Bantuan
-xiao help           # Panduan lengkap perintah CLI
+xiao help                     # Panduan lengkap perintah CLI
 ```
 
 ---

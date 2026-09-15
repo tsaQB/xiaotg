@@ -999,11 +999,15 @@ async fn run_cli_gateway_telegram_submenu() {
     loop {
         let token = get_configured_token().unwrap_or_default();
         let owner_id = get_configured_owner_id();
+        let access_mode = crate::ai::storage::load_access_mode();
+        let daily_quota = crate::ai::storage::load_public_daily_quota();
 
         let summary = format!(
             "== Gateway: Telegram ==\r\n\
-             • Token:    {}\r\n\
-             • Owner ID: {}",
+             • Token:        {}\r\n\
+             • Owner ID:     {}\r\n\
+             • Mode Akses:   {}\r\n\
+             • Kuota Publik: {} pesan/hari",
             if token.is_empty() {
                 "Belum dikonfigurasi"
             } else {
@@ -1011,13 +1015,27 @@ async fn run_cli_gateway_telegram_submenu() {
             },
             owner_id
                 .map(|i| i.to_string())
-                .unwrap_or_else(|| "Belum diset".to_string())
+                .unwrap_or_else(|| "Belum diset".to_string()),
+            match access_mode {
+                crate::ai::storage::AccessMode::SingleOwner => "Single-Owner (Khusus Owner)",
+                crate::ai::storage::AccessMode::Public => "Public (Semua Pengguna)",
+            },
+            daily_quota,
         );
 
         let actions = vec![
             "Cek Koneksi / Ping Telegram API".to_string(),
             "Ubah Telegram Bot Token".to_string(),
             "Ubah Telegram Owner User ID".to_string(),
+            format!(
+                "Ganti Mode Akses [Saat ini: {}]",
+                match access_mode {
+                    crate::ai::storage::AccessMode::SingleOwner => "Single-Owner",
+                    crate::ai::storage::AccessMode::Public => "Public",
+                }
+            ),
+            format!("Atur Kuota Harian Publik [Saat ini: {daily_quota}]"),
+            "Lihat Rekap Penggunaan Kuota Hari Ini".to_string(),
             "Kembali".to_string(),
         ];
 
@@ -1040,6 +1058,38 @@ async fn run_cli_gateway_telegram_submenu() {
             2 => {
                 run_cli_telegram_owner(None).await;
             }
+            3 => {
+                let target_mode = match access_mode {
+                    crate::ai::storage::AccessMode::SingleOwner => "public",
+                    crate::ai::storage::AccessMode::Public => "single",
+                };
+                run_cli_gateway_mode(Some(target_mode)).await;
+                print!("\x1b[38;5;244mTekan Enter untuk melanjutkan...\x1b[0m");
+                let _ = io::stdout().flush();
+                let mut tmp = String::new();
+                let _ = io::stdin().read_line(&mut tmp);
+            }
+            4 => {
+                print!("Masukkan batas kuota harian baru (pesan/hari): ");
+                let _ = io::stdout().flush();
+                let mut input = String::new();
+                let _ = io::stdin().read_line(&mut input);
+                let trimmed = input.trim();
+                if !trimmed.is_empty() {
+                    run_cli_gateway_quota(Some(trimmed)).await;
+                    print!("\x1b[38;5;244mTekan Enter untuk melanjutkan...\x1b[0m");
+                    let _ = io::stdout().flush();
+                    let mut tmp = String::new();
+                    let _ = io::stdin().read_line(&mut tmp);
+                }
+            }
+            5 => {
+                run_cli_gateway_usage().await;
+                print!("\x1b[38;5;244mTekan Enter untuk kembali...\x1b[0m");
+                let _ = io::stdout().flush();
+                let mut tmp = String::new();
+                let _ = io::stdin().read_line(&mut tmp);
+            }
             _ => break,
         }
     }
@@ -1060,6 +1110,15 @@ pub(crate) async fn run_cli_gateway_hub(action: Option<&str>, target: Option<&st
         Some("owner") => {
             run_cli_telegram_owner(target).await;
         }
+        Some("mode") => {
+            run_cli_gateway_mode(target).await;
+        }
+        Some("quota") => {
+            run_cli_gateway_quota(target).await;
+        }
+        Some("usage") => {
+            run_cli_gateway_usage().await;
+        }
         Some("help") | Some("--help") | Some("-h") => {
             println!("\n\x1b[1;36mxiao gateway — Telegram Messaging Gateway Management\x1b[0m\n");
             println!("\x1b[1;37mUsage:\x1b[0m");
@@ -1072,14 +1131,114 @@ pub(crate) async fn run_cli_gateway_hub(action: Option<&str>, target: Option<&st
             println!(
                 "     \x1b[36mxiao gateway token <TOKEN>\x1b[0m  Bind and verify Telegram Bot Token"
             );
+            println!("     \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID");
             println!(
-                "     \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID\n"
+                "     \x1b[36mxiao gateway mode [single|public]\x1b[0m Set or view gateway access mode"
+            );
+            println!(
+                "     \x1b[36mxiao gateway quota [LIMIT]\x1b[0m        Set or view public daily quota"
+            );
+            println!(
+                "     \x1b[36mxiao gateway usage\x1b[0m                View public user quota usage today\n"
             );
         }
         Some(unknown) => {
             println!("\x1b[31m✖ Error: Sub-perintah 'gateway {unknown}' tidak dikenal.\x1b[0m");
             println!("  Jalankan 'xiao gateway help' atau 'xiao help' untuk bantuan.\n");
         }
+    }
+}
+
+pub(crate) async fn run_cli_gateway_mode(target: Option<&str>) {
+    load_environment();
+    if let Some(arg) = target {
+        if let Some(mode) = crate::ai::storage::AccessMode::parse_mode(arg) {
+            if let Err(e) = crate::ai::storage::save_access_mode(mode) {
+                println!("\x1b[31m✖ Gagal menyimpan mode akses: {e}\x1b[0m");
+            } else {
+                match mode {
+                    crate::ai::storage::AccessMode::SingleOwner => {
+                        println!("\n\x1b[32m✔ Mode akses diatur ke: Single-Owner\x1b[0m");
+                        println!("  Xiao hanya akan merespons pesan dari Telegram Owner ID.\n");
+                    }
+                    crate::ai::storage::AccessMode::Public => {
+                        println!("\n\x1b[32m✔ Mode akses diatur ke: Public\x1b[0m");
+                        println!("  Xiao dapat merespons obrolan dari semua pengguna (PM & grup) sesuai kuota harian.\n");
+                    }
+                }
+            }
+        } else {
+            println!("\x1b[31m✖ Argumen mode tidak valid: '{arg}'. Gunakan 'single' atau 'public'.\x1b[0m");
+        }
+    } else {
+        let current = crate::ai::storage::load_access_mode();
+        println!("\n\x1b[1;36mMode Akses Gateway Saat Ini:\x1b[0m");
+        match current {
+            crate::ai::storage::AccessMode::SingleOwner => {
+                println!("  Mode: \x1b[33mSingle-Owner\x1b[0m (Khusus Owner)");
+                println!("  Gunakan '\x1b[36mxiao gateway mode public\x1b[0m' untuk membuka bot ke publik.\n");
+            }
+            crate::ai::storage::AccessMode::Public => {
+                println!("  Mode: \x1b[32mPublic\x1b[0m (Terbuka untuk semua user)");
+                println!("  Gunakan '\x1b[36mxiao gateway mode single\x1b[0m' untuk mengunci bot kembali ke mode single-owner.\n");
+            }
+        }
+    }
+}
+
+pub(crate) async fn run_cli_gateway_quota(target: Option<&str>) {
+    load_environment();
+    if let Some(arg) = target {
+        match arg.trim().parse::<u32>() {
+            Ok(limit) if limit > 0 => {
+                if let Err(e) = crate::ai::storage::save_public_daily_quota(limit) {
+                    println!("\x1b[31m✖ Gagal menyimpan kuota: {e}\x1b[0m");
+                } else {
+                    println!("\n\x1b[32m✔ Batas kuota harian user publik berhasil diatur ke: {limit} pesan/hari\x1b[0m");
+                    println!("  Kuota akan di-reset otomatis setiap pukul 00:00 (tengah malam).\n");
+                }
+            }
+            _ => {
+                println!("\x1b[31m✖ Nilai kuota harus berupa angka positif (contoh: 'xiao gateway quota 30').\x1b[0m");
+            }
+        }
+    } else {
+        let quota = crate::ai::storage::load_public_daily_quota();
+        println!("\n\x1b[1;36mBatas Kuota Harian Publik Saat Ini:\x1b[0m");
+        println!("  Limit: \x1b[32m{quota} pesan/hari\x1b[0m per user.");
+        println!(
+            "  Gunakan '\x1b[36mxiao gateway quota <JUMLAH>\x1b[0m' untuk mengubah batas kuota.\n"
+        );
+    }
+}
+
+pub(crate) async fn run_cli_gateway_usage() {
+    load_environment();
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let entries = crate::ai::storage::get_daily_quota_summary_async(today.clone()).await;
+    let limit = crate::ai::storage::load_public_daily_quota();
+
+    println!("\n\x1b[1;36mRekap Penggunaan Kuota Publik ({today})\x1b[0m");
+    println!("  Batas Kuota Harian: {limit} pesan/user/hari\n");
+
+    if entries.is_empty() {
+        println!("  \x1b[38;5;244m○ Belum ada aktivitas dari pengguna publik hari ini.\x1b[0m\n");
+    } else {
+        println!("  ┌────────────────────┬──────────────┬────────────────────────────┐");
+        println!("  │ User ID            │ Penggunaan   │ Aktivitas Terakhir         │");
+        println!("  ├────────────────────┼──────────────┼────────────────────────────┤");
+        for entry in entries {
+            let status_badge = if entry.request_count >= limit {
+                format!("{}/{} (Habis)", entry.request_count, limit)
+            } else {
+                format!("{}/{}", entry.request_count, limit)
+            };
+            println!(
+                "  │ {:<18} │ {:<12} │ {:<26} │",
+                entry.user_id, status_badge, entry.last_request_at
+            );
+        }
+        println!("  └────────────────────┴──────────────┴────────────────────────────┘\n");
     }
 }
 
@@ -3118,7 +3277,7 @@ pub(crate) fn print_cli_help() {
     println!("  \x1b[36mcontext [chat] [th]\x1b[0m  Display token consumption and context gauge (default: owner private chat)");
     println!("  \x1b[36mmemory [action]\x1b[0m     Manage long-term user memories (list, rm <key>, clear)");
     println!("  \x1b[36mai [action]\x1b[0m         Unified AI management hub (Model, Provider, Addon) [Interactive/One-Liner]");
-    println!("  \x1b[36mgateway [action]\x1b[0m    Manage Telegram messaging gateway (Token & Owner ID) [Interactive/One-Liner]");
+    println!("  \x1b[36mgateway [action]\x1b[0m    Manage Telegram messaging gateway (Token, Owner, Mode, Quota) [Interactive/One-Liner]");
     println!("  \x1b[36mversion, -v\x1b[0m         Display binary version");
     println!("  \x1b[36mhelp\x1b[0m                Show this help message\n");
     println!("\x1b[1;37mUsage for 'chat':\x1b[0m");
@@ -3151,7 +3310,14 @@ pub(crate) fn print_cli_help() {
         "     \x1b[36mxiao gateway check\x1b[0m          Verify bot token connectivity (getMe)"
     );
     println!("     \x1b[36mxiao gateway token <TOKEN>\x1b[0m  Bind and verify Telegram Bot Token");
-    println!("     \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID\n");
+    println!("     \x1b[36mxiao gateway owner <ID>\x1b[0m     Set Telegram Owner User ID");
+    println!(
+        "     \x1b[36mxiao gateway mode [single|public]\x1b[0m Set or view gateway access mode"
+    );
+    println!(
+        "     \x1b[36mxiao gateway quota [LIMIT]\x1b[0m        Set or view public daily quota"
+    );
+    println!("     \x1b[36mxiao gateway usage\x1b[0m                View public user quota usage today\n");
 }
 
 #[cfg(test)]

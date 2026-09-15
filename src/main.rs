@@ -70,6 +70,7 @@ fn build_audio_chat_input<'a>(
 
 #[derive(Clone, Debug)]
 struct AccessPolicy {
+    mode: ai::storage::AccessMode,
     owner_user_id: i64,
     allowed_chat_ids: HashSet<i64>,
     bot_username: Option<String>,
@@ -77,24 +78,40 @@ struct AccessPolicy {
 
 impl AccessPolicy {
     fn allows(&self, user_id: i64, chat_id: i64) -> bool {
-        if user_id != self.owner_user_id {
-            return false;
+        match self.mode {
+            ai::storage::AccessMode::SingleOwner => {
+                if user_id != self.owner_user_id {
+                    return false;
+                }
+                if chat_id == self.owner_user_id {
+                    return true;
+                }
+                // If specific allowed_chat_ids are configured, enforce the whitelist.
+                // If allowed_chat_ids is empty, allow owner in any group/topic.
+                self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
+            }
+            ai::storage::AccessMode::Public => {
+                // In public mode, any user is allowed in PM or groups,
+                // subject to allowed_chat_ids whitelist if configured.
+                self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
+            }
         }
-        if chat_id == self.owner_user_id {
-            return true;
-        }
-        // If specific allowed_chat_ids are configured, enforce the whitelist.
-        // If allowed_chat_ids is empty, allow owner in any group/topic.
-        self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
     }
 
     fn allows_stop_chat(&self, chat_id: i64) -> bool {
-        // MessageGenerationStopped does not identify who pressed Stop. To prevent
-        // another group participant from cancelling the owner's request, native
-        // Stop is accepted only in the owner's private chat.
-        chat_id == self.owner_user_id
+        match self.mode {
+            ai::storage::AccessMode::SingleOwner => {
+                // MessageGenerationStopped does not identify who pressed Stop. To prevent
+                // another group participant from cancelling the owner's request, native
+                // Stop is accepted only in the owner's private chat.
+                chat_id == self.owner_user_id
+            }
+            ai::storage::AccessMode::Public => true,
+        }
     }
 }
+
+type UserCooldownTracker = Arc<tokio::sync::Mutex<HashMap<i64, Instant>>>;
 
 fn prepare_incoming_chat_text(
     raw_text: &str,
@@ -282,6 +299,24 @@ async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMe
                 vec![
                     RichBlockTableCell::text_only("Context", false, Some("left")),
                     RichBlockTableCell::text_only(&context, false, Some("left")),
+                ],
+                vec![
+                    RichBlockTableCell::text_only("Gateway", false, Some("left")),
+                    RichBlockTableCell::text_only(
+                        &match ai::storage::load_access_mode() {
+                            ai::storage::AccessMode::SingleOwner => "Single-Owner".to_string(),
+                            ai::storage::AccessMode::Public => {
+                                let limit = ai::storage::load_public_daily_quota();
+                                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                                let used =
+                                    ai::storage::get_user_quota_usage_async(user_id as u64, today)
+                                        .await;
+                                format!("Public ({used}/{limit} req)")
+                            }
+                        },
+                        false,
+                        Some("left"),
+                    ),
                 ],
             ],
             has_header: true,
@@ -919,6 +954,9 @@ async fn handle_image_generation(
     prompt: &str,
     explanation_prompt: Option<&str>,
 ) {
+    let generation_lock = ai_service.generation_lock(chat_id, thread_id).await;
+    let _generation_guard = generation_lock.lock().await;
+
     let mut clean_prompt = prompt.trim().to_string();
 
     if clean_prompt == "__CONTEXT_FOLLOWUP__"
@@ -1462,6 +1500,7 @@ async fn process_durable_update(
     ai_service: &AIChatService,
     user_last_image_prompt: &UserLastImagePrompt,
     access: &AccessPolicy,
+    cooldown_tracker: &UserCooldownTracker,
     update: Update,
 ) {
     let update_id = update.update_id;
@@ -1472,7 +1511,14 @@ async fn process_durable_update(
     let delivery_context = delivery_context_for_update(&update);
     TelegramBotClient::with_delivery_context(
         delivery_context,
-        handle_update(bot, ai_service, user_last_image_prompt, access, update),
+        handle_update(
+            bot,
+            ai_service,
+            user_last_image_prompt,
+            access,
+            cooldown_tracker,
+            update,
+        ),
     )
     .await;
 
@@ -1586,6 +1632,7 @@ async fn handle_update(
     ai_service: &AIChatService,
     user_last_image_prompt: &UserLastImagePrompt,
     access: &AccessPolicy,
+    cooldown_tracker: &UserCooldownTracker,
     update: Update,
 ) {
     if let Some(stopped) = update.stopped_message_generation.as_ref() {
@@ -1640,6 +1687,75 @@ async fn handle_update(
         ) else {
             return;
         };
+
+        // Navigation / Start is always free and exempt from quota and cooldown
+        if command_matches(&text, "/start") {
+            send_welcome(bot, ai_service, chat_id, user_id).await;
+            return;
+        }
+
+        // AccessMode::Public Rate-Limiting & Quota Enforcement
+        if access.mode == ai::storage::AccessMode::Public && user_id != access.owner_user_id {
+            // Anti-spam Cooldown (3 seconds)
+            let is_on_cooldown = {
+                let mut tracker = cooldown_tracker.lock().await;
+                let now = Instant::now();
+                if let Some(last_at) = tracker.get(&user_id) {
+                    if now.duration_since(*last_at) < Duration::from_secs(3) {
+                        true
+                    } else {
+                        tracker.insert(user_id, now);
+                        false
+                    }
+                } else {
+                    tracker.insert(user_id, now);
+                    false
+                }
+            };
+
+            if is_on_cooldown {
+                let _ = bot
+                    .send_message(
+                        chat_id,
+                        "⏳ <i>Mohon tunggu setidaknya 3 detik sebelum mengirim pesan berikutnya.</i>",
+                        Some("HTML"),
+                        None,
+                        None,
+                        if is_group { Some(thread_id) } else { None },
+                    )
+                    .await;
+                return;
+            }
+
+            // Daily Quota Tracking (reset at midnight 00:00)
+            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            let daily_limit = ai::storage::load_public_daily_quota();
+            let (allowed, _count) = ai::storage::check_and_increment_user_quota_async(
+                user_id as u64,
+                today,
+                daily_limit,
+            )
+            .await;
+
+            if !allowed {
+                let _ = bot
+                    .send_message(
+                        chat_id,
+                        &format!(
+                            "⚠️ <b>Batas Kuota Harian Tercapai</b>\n\n\
+                             Maaf, kuota penggunaan Anda hari ini (maksimal <b>{daily_limit} pesan/hari</b>) telah habis.\n\
+                             Kuota akan di-reset otomatis setiap tengah malam (<b>00:00</b>).\n\n\
+                             <i>Terima kasih telah menggunakan Xiao!</i>"
+                        ),
+                        Some("HTML"),
+                        None,
+                        None,
+                        if is_group { Some(thread_id) } else { None },
+                    )
+                    .await;
+                return;
+            }
+        }
 
         let mut image_bytes = None;
         let mut document_images = None;
@@ -1920,12 +2036,6 @@ async fn handle_update(
             return;
         }
 
-        // Navigation / Start
-        if command_matches(&text, "/start") {
-            send_welcome(bot, ai_service, chat_id, user_id).await;
-            return;
-        }
-
         let is_explicit_image = command_matches(&text, "/image");
         let image_arg = if is_explicit_image {
             command_args(&text, "/image").unwrap_or("")
@@ -2134,7 +2244,10 @@ async fn main() {
         }
     };
 
+    let access_mode = ai::storage::load_access_mode();
+    info!("Mode akses Telegram Gateway: {:?}", access_mode);
     let access = Arc::new(AccessPolicy {
+        mode: access_mode,
         owner_user_id,
         allowed_chat_ids: get_allowed_chat_ids(),
         bot_username,
@@ -2151,21 +2264,32 @@ async fn main() {
 
     let (generation_tx, mut generation_rx) = tokio::sync::mpsc::channel::<Update>(64);
     let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<Update>(64);
+    let cooldown_tracker: UserCooldownTracker = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let generation_concurrency = Arc::new(tokio::sync::Semaphore::new(4));
 
     let generation_bot = bot.clone();
     let generation_ai = Arc::clone(&ai_service);
     let generation_last_image = Arc::clone(&user_last_image_prompt);
     let generation_access = Arc::clone(&access);
+    let generation_cooldown = Arc::clone(&cooldown_tracker);
+    let generation_sem = Arc::clone(&generation_concurrency);
+
     let generation_worker = tokio::spawn(async move {
         while let Some(update) = generation_rx.recv().await {
-            process_durable_update(
-                &generation_bot,
-                &generation_ai,
-                &generation_last_image,
-                &generation_access,
-                update,
-            )
-            .await;
+            let permit = match generation_sem.clone().acquire_owned().await {
+                Ok(p) => p,
+                Err(_) => break,
+            };
+            let b = generation_bot.clone();
+            let ai = Arc::clone(&generation_ai);
+            let img = Arc::clone(&generation_last_image);
+            let acc = Arc::clone(&generation_access);
+            let cd = Arc::clone(&generation_cooldown);
+
+            tokio::spawn(async move {
+                let _permit = permit;
+                process_durable_update(&b, &ai, &img, &acc, &cd, update).await;
+            });
         }
     });
 
@@ -2173,6 +2297,7 @@ async fn main() {
     let control_ai = Arc::clone(&ai_service);
     let control_last_image = Arc::clone(&user_last_image_prompt);
     let control_access = Arc::clone(&access);
+    let control_cooldown = Arc::clone(&cooldown_tracker);
     let control_worker = tokio::spawn(async move {
         while let Some(update) = control_rx.recv().await {
             process_durable_update(
@@ -2180,6 +2305,7 @@ async fn main() {
                 &control_ai,
                 &control_last_image,
                 &control_access,
+                &control_cooldown,
                 update,
             )
             .await;
@@ -2211,6 +2337,7 @@ async fn main() {
                             &ai_service,
                             &user_last_image_prompt,
                             &access,
+                            &cooldown_tracker,
                             update,
                         )
                         .await;
@@ -2292,6 +2419,7 @@ async fn main() {
                                         &ai_service,
                                         &user_last_image_prompt,
                                         &access,
+                                        &cooldown_tracker,
                                         update,
                                     )
                                     .await;
@@ -2336,6 +2464,11 @@ async fn main() {
         Ok(Err(err)) => warn!("Generation worker terminated with error: {err}"),
         Err(_) => warn!("Generation worker did not stop within shutdown grace period"),
     }
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        generation_concurrency.acquire_many(4),
+    )
+    .await;
 }
 
 #[cfg(test)]
@@ -2465,6 +2598,7 @@ mod update_lane_tests {
     #[test]
     fn access_policy_allows_native_stop_only_in_owner_private_chat() {
         let policy = AccessPolicy {
+            mode: ai::storage::AccessMode::SingleOwner,
             owner_user_id: 42,
             allowed_chat_ids: [100, 200].into_iter().collect(),
             bot_username: Some("xiao_bot".to_string()),
@@ -2478,6 +2612,7 @@ mod update_lane_tests {
     #[test]
     fn access_policy_allows_owner_in_private_and_groups_when_whitelist_empty() {
         let policy = AccessPolicy {
+            mode: ai::storage::AccessMode::SingleOwner,
             owner_user_id: 42,
             allowed_chat_ids: HashSet::new(),
             bot_username: Some("Sms2tg_bot".to_string()),
@@ -2486,14 +2621,34 @@ mod update_lane_tests {
         assert!(policy.allows(42, 42));
         // Owner in supergroup / topic group (negative chat ID)
         assert!(policy.allows(42, -1001234567890));
-        // Non-owner in private or group is rejected
+        // Non-owner in private or group is rejected in single-owner mode
         assert!(!policy.allows(999, 999));
         assert!(!policy.allows(999, -1001234567890));
     }
 
     #[test]
+    fn access_policy_public_mode_allows_all_users() {
+        let policy = AccessPolicy {
+            mode: ai::storage::AccessMode::Public,
+            owner_user_id: 42,
+            allowed_chat_ids: HashSet::new(),
+            bot_username: Some("Sms2tg_bot".to_string()),
+        };
+        // Owner allowed
+        assert!(policy.allows(42, 42));
+        assert!(policy.allows(42, -1001234567890));
+        // Public non-owners allowed
+        assert!(policy.allows(999, 999));
+        assert!(policy.allows(999, -1001234567890));
+        // Native stop allowed for anyone in public mode
+        assert!(policy.allows_stop_chat(999));
+        assert!(policy.allows_stop_chat(-1001234567890));
+    }
+
+    #[test]
     fn access_policy_enforces_whitelist_when_configured() {
         let policy = AccessPolicy {
+            mode: ai::storage::AccessMode::SingleOwner,
             owner_user_id: 42,
             allowed_chat_ids: [-100111, -100222].into_iter().collect(),
             bot_username: Some("Sms2tg_bot".to_string()),
@@ -2505,7 +2660,7 @@ mod update_lane_tests {
         assert!(policy.allows(42, -100222));
         // Non-whitelisted group rejected
         assert!(!policy.allows(42, -100999));
-        // Non-owner always rejected even in whitelisted group
+        // Non-owner always rejected in single-owner mode even in whitelisted group
         assert!(!policy.allows(999, -100111));
     }
 

@@ -556,9 +556,17 @@ fn open_session_db() -> rusqlite::Result<Connection> {
             updated_at TEXT NOT NULL,
             PRIMARY KEY(chat_id, thread_id)
         );
+        CREATE TABLE IF NOT EXISTS user_quotas (
+            user_id INTEGER NOT NULL,
+            usage_date TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            last_request_at TEXT NOT NULL,
+            PRIMARY KEY(user_id, usage_date)
+        );
         CREATE INDEX IF NOT EXISTS idx_messages_user_session ON messages(user_id, session_id);
         CREATE INDEX IF NOT EXISTS idx_user_memories_user ON user_memories(user_id);
-        CREATE INDEX IF NOT EXISTS idx_telegram_inbox_status_update_id ON telegram_inbox(status, update_id);",
+        CREATE INDEX IF NOT EXISTS idx_telegram_inbox_status_update_id ON telegram_inbox(status, update_id);
+        CREATE INDEX IF NOT EXISTS idx_user_quotas_date ON user_quotas(usage_date);",
     )?;
     ensure_column(
         &conn,
@@ -2134,6 +2142,180 @@ pub fn save_app_setting(key: &str, value: &str) -> std::io::Result<()> {
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
+pub const SETTING_ACCESS_MODE: &str = "ACCESS_MODE";
+pub const SETTING_PUBLIC_DAILY_QUOTA: &str = "PUBLIC_DAILY_QUOTA";
+pub const DEFAULT_PUBLIC_DAILY_QUOTA: u32 = 25;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccessMode {
+    SingleOwner,
+    Public,
+}
+
+impl AccessMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AccessMode::SingleOwner => "single",
+            AccessMode::Public => "public",
+        }
+    }
+
+    pub fn parse_mode(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "single" | "single_owner" | "single-owner" | "owner" => Some(AccessMode::SingleOwner),
+            "public" => Some(AccessMode::Public),
+            _ => None,
+        }
+    }
+}
+
+pub fn load_access_mode() -> AccessMode {
+    load_app_setting(SETTING_ACCESS_MODE)
+        .as_deref()
+        .and_then(AccessMode::parse_mode)
+        .unwrap_or(AccessMode::SingleOwner)
+}
+
+pub fn save_access_mode(mode: AccessMode) -> std::io::Result<()> {
+    save_app_setting(SETTING_ACCESS_MODE, mode.as_str())
+}
+
+pub fn load_public_daily_quota() -> u32 {
+    load_app_setting(SETTING_PUBLIC_DAILY_QUOTA)
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(DEFAULT_PUBLIC_DAILY_QUOTA)
+}
+
+pub fn save_public_daily_quota(quota: u32) -> std::io::Result<()> {
+    save_app_setting(SETTING_PUBLIC_DAILY_QUOTA, &quota.to_string())
+}
+
+pub fn check_and_increment_user_quota_on_conn(
+    conn: &Connection,
+    user_id: u64,
+    date: &str,
+    limit: u32,
+    now_iso: &str,
+) -> rusqlite::Result<(bool, u32)> {
+    let current_count: u32 = conn
+        .query_row(
+            "SELECT request_count FROM user_quotas WHERE user_id = ?1 AND usage_date = ?2",
+            params![user_id as i64, date],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+
+    if current_count >= limit {
+        return Ok((false, current_count));
+    }
+
+    let new_count = current_count + 1;
+    conn.execute(
+        "INSERT INTO user_quotas(user_id, usage_date, request_count, last_request_at)
+         VALUES(?1, ?2, 1, ?3)
+         ON CONFLICT(user_id, usage_date) DO UPDATE SET
+             request_count = request_count + 1,
+             last_request_at = excluded.last_request_at",
+        params![user_id as i64, date, now_iso],
+    )?;
+
+    Ok((true, new_count))
+}
+
+pub fn check_and_increment_user_quota(
+    user_id: u64,
+    date: &str,
+    limit: u32,
+) -> rusqlite::Result<(bool, u32)> {
+    let conn = open_session_db()?;
+    let now_iso = Local::now().to_rfc3339();
+    check_and_increment_user_quota_on_conn(&conn, user_id, date, limit, &now_iso)
+}
+
+pub async fn check_and_increment_user_quota_async(
+    user_id: u64,
+    date: String,
+    limit: u32,
+) -> (bool, u32) {
+    run_db("check_and_increment_user_quota", move || {
+        check_and_increment_user_quota(user_id, &date, limit)
+    })
+    .await
+    .unwrap_or((false, limit))
+}
+
+pub fn get_user_quota_usage_on_conn(
+    conn: &Connection,
+    user_id: u64,
+    date: &str,
+) -> rusqlite::Result<u32> {
+    conn.query_row(
+        "SELECT request_count FROM user_quotas WHERE user_id = ?1 AND usage_date = ?2",
+        params![user_id as i64, date],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|opt| opt.unwrap_or(0))
+}
+
+pub fn get_user_quota_usage(user_id: u64, date: &str) -> rusqlite::Result<u32> {
+    let conn = open_session_db()?;
+    get_user_quota_usage_on_conn(&conn, user_id, date)
+}
+
+pub async fn get_user_quota_usage_async(user_id: u64, date: String) -> u32 {
+    run_db("get_user_quota_usage", move || {
+        get_user_quota_usage(user_id, &date)
+    })
+    .await
+    .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserQuotaUsageEntry {
+    pub user_id: u64,
+    pub request_count: u32,
+    pub last_request_at: String,
+}
+
+pub fn get_daily_quota_summary_on_conn(
+    conn: &Connection,
+    date: &str,
+) -> rusqlite::Result<Vec<UserQuotaUsageEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT user_id, request_count, last_request_at FROM user_quotas
+         WHERE usage_date = ?1 ORDER BY request_count DESC LIMIT 50",
+    )?;
+    let rows = stmt.query_map(params![date], |row| {
+        let uid: i64 = row.get(0)?;
+        Ok(UserQuotaUsageEntry {
+            user_id: uid as u64,
+            request_count: row.get(1)?,
+            last_request_at: row.get(2)?,
+        })
+    })?;
+    let mut entries = Vec::new();
+    for entry in rows {
+        entries.push(entry?);
+    }
+    Ok(entries)
+}
+
+pub fn get_daily_quota_summary(date: &str) -> rusqlite::Result<Vec<UserQuotaUsageEntry>> {
+    let conn = open_session_db()?;
+    get_daily_quota_summary_on_conn(&conn, date)
+}
+
+pub async fn get_daily_quota_summary_async(date: String) -> Vec<UserQuotaUsageEntry> {
+    run_db("get_daily_quota_summary", move || {
+        get_daily_quota_summary(&date)
+    })
+    .await
+    .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2173,8 +2355,16 @@ mod tests {
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY(chat_id, thread_id)
             );
+            CREATE TABLE user_quotas (
+                user_id INTEGER NOT NULL,
+                usage_date TEXT NOT NULL,
+                request_count INTEGER NOT NULL DEFAULT 0,
+                last_request_at TEXT NOT NULL,
+                PRIMARY KEY(user_id, usage_date)
+            );
             CREATE INDEX idx_messages_chat_thread ON messages(chat_id, thread_id);
-            CREATE INDEX idx_user_memories_user ON user_memories(user_id);",
+            CREATE INDEX idx_user_memories_user ON user_memories(user_id);
+            CREATE INDEX idx_user_quotas_date ON user_quotas(usage_date);",
         )
         .unwrap();
         conn
@@ -3015,5 +3205,102 @@ mod tests {
         assert!(!group_topic_scope.is_private());
         assert_eq!(group_topic_scope.chat_id, -1001234567);
         assert_eq!(group_topic_scope.thread_id, 99);
+    }
+
+    #[test]
+    fn test_user_quota_tracking() {
+        let conn = session_test_conn();
+        let date = "2026-09-15";
+        let user_id = 9999123;
+        let limit = 3;
+
+        assert_eq!(
+            get_user_quota_usage_on_conn(&conn, user_id, date).unwrap(),
+            0
+        );
+
+        // Turn 1
+        let (allowed, count) = check_and_increment_user_quota_on_conn(
+            &conn,
+            user_id,
+            date,
+            limit,
+            "2026-09-15T10:00:00Z",
+        )
+        .unwrap();
+        assert!(allowed);
+        assert_eq!(count, 1);
+        assert_eq!(
+            get_user_quota_usage_on_conn(&conn, user_id, date).unwrap(),
+            1
+        );
+
+        // Turn 2
+        let (allowed, count) = check_and_increment_user_quota_on_conn(
+            &conn,
+            user_id,
+            date,
+            limit,
+            "2026-09-15T10:05:00Z",
+        )
+        .unwrap();
+        assert!(allowed);
+        assert_eq!(count, 2);
+
+        // Turn 3 (reaches limit)
+        let (allowed, count) = check_and_increment_user_quota_on_conn(
+            &conn,
+            user_id,
+            date,
+            limit,
+            "2026-09-15T10:10:00Z",
+        )
+        .unwrap();
+        assert!(allowed);
+        assert_eq!(count, 3);
+
+        // Turn 4 (exceeds limit)
+        let (allowed, count) = check_and_increment_user_quota_on_conn(
+            &conn,
+            user_id,
+            date,
+            limit,
+            "2026-09-15T10:15:00Z",
+        )
+        .unwrap();
+        assert!(!allowed);
+        assert_eq!(count, 3);
+        assert_eq!(
+            get_user_quota_usage_on_conn(&conn, user_id, date).unwrap(),
+            3
+        );
+
+        // Summary
+        let summary = get_daily_quota_summary_on_conn(&conn, date).unwrap();
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].user_id, user_id);
+        assert_eq!(summary[0].request_count, 3);
+    }
+
+    #[test]
+    fn test_access_mode_parsing() {
+        assert_eq!(
+            AccessMode::parse_mode("single"),
+            Some(AccessMode::SingleOwner)
+        );
+        assert_eq!(
+            AccessMode::parse_mode("single_owner"),
+            Some(AccessMode::SingleOwner)
+        );
+        assert_eq!(
+            AccessMode::parse_mode("owner"),
+            Some(AccessMode::SingleOwner)
+        );
+        assert_eq!(AccessMode::parse_mode("public"), Some(AccessMode::Public));
+        assert_eq!(AccessMode::parse_mode("PUBLIC"), Some(AccessMode::Public));
+        assert_eq!(AccessMode::parse_mode("invalid"), None);
+
+        assert_eq!(AccessMode::SingleOwner.as_str(), "single");
+        assert_eq!(AccessMode::Public.as_str(), "public");
     }
 }
