@@ -42,12 +42,17 @@ pub fn detect_archive_kind(mime: &str, name: &str) -> Option<ArchiveKind> {
     if clean_mime == "application/x-tar" || clean_mime == "application/tar" {
         return Some(ArchiveKind::Tar);
     }
-    if clean_mime == "application/gzip"
-        || clean_mime == "application/x-gzip"
-        || clean_mime == "application/x-compressed-tar"
-        || clean_mime == "application/x-tgz"
-    {
+    if clean_mime == "application/x-compressed-tar" || clean_mime == "application/x-tgz" {
         return Some(ArchiveKind::TarGz);
+    }
+    if clean_mime == "application/gzip" || clean_mime == "application/x-gzip" {
+        if lower_name.ends_with(".tar.gz")
+            || lower_name.ends_with(".tgz")
+            || lower_name.ends_with(".tar")
+        {
+            return Some(ArchiveKind::TarGz);
+        }
+        return None;
     }
     if clean_mime == "application/x-7z-compressed" || clean_mime == "application/7z" {
         return Some(ArchiveKind::SevenZ);
@@ -70,6 +75,7 @@ pub fn detect_archive_kind(mime: &str, name: &str) -> Option<ArchiveKind> {
 pub enum ArchiveEntryCategory {
     Directory,
     Text,
+    OversizedText,
     NestedArchive,
     Binary,
 }
@@ -85,11 +91,9 @@ pub fn classify_archive_entry(path: &str) -> ArchiveEntryCategory {
     let file_name = lower.split('/').next_back().unwrap_or("");
 
     // Nested archives: Single-Level Flat rule (do not unpack recursively)
-    if [
-        ".zip", ".tar", ".tar.gz", ".tgz", ".7z", ".rar", ".gz", ".bz2", ".xz", ".zst",
-    ]
-    .iter()
-    .any(|suffix| lower.ends_with(suffix))
+    if [".zip", ".tar", ".tar.gz", ".tgz", ".7z"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
     {
         return ArchiveEntryCategory::NestedArchive;
     }
@@ -260,6 +264,13 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ArchiveExtractionBudget {
+    pub total_uncompressed: usize,
+    pub total_extracted_chars: usize,
+    pub budget_exhausted: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ExtractedArchiveItem {
     pub path: String,
@@ -268,8 +279,65 @@ pub struct ExtractedArchiveItem {
     pub text_content: Option<String>,
 }
 
+fn read_text_entry_bounded<R: Read + ?Sized>(
+    reader: &mut R,
+    size: u64,
+    budget: &mut ArchiveExtractionBudget,
+) -> (ArchiveEntryCategory, Option<String>) {
+    if budget.budget_exhausted.is_some() {
+        return (ArchiveEntryCategory::Text, None);
+    }
+
+    if size as usize > MAX_ARCHIVE_SINGLE_ENTRY_BYTES {
+        return (ArchiveEntryCategory::OversizedText, None);
+    }
+
+    if budget.total_uncompressed.saturating_add(size as usize)
+        > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES
+    {
+        budget.budget_exhausted = Some(
+            "Batas dekompresi 30 MB tercapai; sisa berkas hanya dicatat pada struktur direktori."
+                .to_string(),
+        );
+        return (ArchiveEntryCategory::Text, None);
+    }
+
+    let mut buf = Vec::with_capacity(size.min(65536) as usize);
+    let read_res = reader
+        .take(MAX_ARCHIVE_SINGLE_ENTRY_BYTES as u64 + 1)
+        .read_to_end(&mut buf);
+
+    match read_res {
+        Ok(bytes_read) => {
+            budget.total_uncompressed = budget.total_uncompressed.saturating_add(bytes_read);
+            if bytes_read <= MAX_ARCHIVE_SINGLE_ENTRY_BYTES && is_valid_text_bytes(&buf) {
+                if let Ok(text) = String::from_utf8(buf) {
+                    if budget.total_extracted_chars.saturating_add(text.len())
+                        > MAX_ARCHIVE_OUTPUT_CHARS
+                    {
+                        budget.budget_exhausted = Some(
+                            "Batas kapasitas konteks teks tercapai; sisa berkas hanya dicatat pada struktur direktori."
+                                .to_string(),
+                        );
+                        (ArchiveEntryCategory::Text, None)
+                    } else {
+                        budget.total_extracted_chars =
+                            budget.total_extracted_chars.saturating_add(text.len());
+                        (ArchiveEntryCategory::Text, Some(text))
+                    }
+                } else {
+                    (ArchiveEntryCategory::Binary, None)
+                }
+            } else {
+                (ArchiveEntryCategory::Binary, None)
+            }
+        }
+        Err(_) => (ArchiveEntryCategory::Binary, None),
+    }
+}
+
 pub fn extract_archive(data: &[u8], kind: ArchiveKind, name: &str) -> Result<String, String> {
-    let (items, budget_exhausted) = match kind {
+    let (items, budget) = match kind {
         ArchiveKind::Zip => extract_zip(data)?,
         ArchiveKind::Tar => extract_tar(data, false)?,
         ArchiveKind::TarGz => extract_tar(data, true)?,
@@ -280,23 +348,28 @@ pub fn extract_archive(data: &[u8], kind: ArchiveKind, name: &str) -> Result<Str
         name,
         kind,
         items,
-        budget_exhausted.as_deref(),
+        budget.budget_exhausted.as_deref(),
     ))
 }
 
-fn extract_zip(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, Option<String>), String> {
+fn extract_zip(
+    data: &[u8],
+) -> Result<(Vec<ExtractedArchiveItem>, ArchiveExtractionBudget), String> {
     let cursor = Cursor::new(data);
     let mut archive = ZipArchive::new(cursor).map_err(|err| format!("ZIP invalid: {err}"))?;
 
     let mut items = Vec::with_capacity(archive.len());
-    let mut total_uncompressed: usize = 0;
-    let mut total_extracted_chars: usize = 0;
-    let mut budget_exhausted: Option<String> = None;
+    let mut budget = ArchiveExtractionBudget::default();
 
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
             .map_err(|err| format!("Gagal membaca entri ZIP index {index}: {err}"))?;
+
+        // Skip symlinks (Unix mode 0o120000 = S_IFLNK)
+        if file.unix_mode().is_some_and(|m| (m & 0o170000) == 0o120000) {
+            continue;
+        }
 
         let raw_name = file.name().to_string();
         let path = sanitize_archive_path(&raw_name);
@@ -313,52 +386,12 @@ fn extract_zip(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, Option<String>
             continue;
         }
 
-        let mut category = classify_archive_entry(&path);
-        let mut text_content = None;
-
-        if category == ArchiveEntryCategory::Text {
-            if budget_exhausted.is_some() {
-                // Keep file in manifest, skip reading content
-            } else if size as usize > MAX_ARCHIVE_SINGLE_ENTRY_BYTES {
-                category = ArchiveEntryCategory::Binary;
-            } else if total_uncompressed.saturating_add(size as usize)
-                > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES
-            {
-                budget_exhausted = Some(
-                    "Batas dekompresi 30 MB tercapai; sisa berkas hanya dicatat pada struktur direktori."
-                        .to_string(),
-                );
-            } else {
-                let mut buf = Vec::with_capacity(size.min(65536) as usize);
-                let read_res = (&mut file)
-                    .take(MAX_ARCHIVE_SINGLE_ENTRY_BYTES as u64 + 1)
-                    .read_to_end(&mut buf);
-
-                if let Ok(bytes_read) = read_res {
-                    total_uncompressed = total_uncompressed.saturating_add(bytes_read);
-                    if bytes_read <= MAX_ARCHIVE_SINGLE_ENTRY_BYTES && is_valid_text_bytes(&buf) {
-                        if let Ok(text) = String::from_utf8(buf) {
-                            if total_extracted_chars.saturating_add(text.len())
-                                > MAX_ARCHIVE_OUTPUT_CHARS
-                            {
-                                budget_exhausted = Some(
-                                    "Batas kapasitas konteks teks tercapai; sisa berkas hanya dicatat pada struktur direktori."
-                                        .to_string(),
-                                );
-                            } else {
-                                total_extracted_chars =
-                                    total_extracted_chars.saturating_add(text.len());
-                                text_content = Some(text);
-                            }
-                        } else {
-                            category = ArchiveEntryCategory::Binary;
-                        }
-                    } else {
-                        category = ArchiveEntryCategory::Binary;
-                    }
-                }
-            }
-        }
+        let initial_category = classify_archive_entry(&path);
+        let (category, text_content) = if initial_category == ArchiveEntryCategory::Text {
+            read_text_entry_bounded(&mut file, size, &mut budget)
+        } else {
+            (initial_category, None)
+        };
 
         items.push(ExtractedArchiveItem {
             path,
@@ -368,20 +401,40 @@ fn extract_zip(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, Option<String>
         });
     }
 
-    Ok((items, budget_exhausted))
+    Ok((items, budget))
+}
+
+struct BoundedCountingReader<R> {
+    inner: R,
+    count: usize,
+    limit: usize,
+}
+
+impl<R: Read> Read for BoundedCountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.count >= self.limit {
+            return Ok(0);
+        }
+        let max_to_read = buf.len().min(self.limit - self.count);
+        let n = self.inner.read(&mut buf[..max_to_read])?;
+        self.count += n;
+        Ok(n)
+    }
 }
 
 fn extract_tar(
     data: &[u8],
     is_gz: bool,
-) -> Result<(Vec<ExtractedArchiveItem>, Option<String>), String> {
+) -> Result<(Vec<ExtractedArchiveItem>, ArchiveExtractionBudget), String> {
     let mut items = Vec::new();
-    let mut total_uncompressed: usize = 0;
-    let mut total_extracted_chars: usize = 0;
-    let mut budget_exhausted: Option<String> = None;
+    let mut budget = ArchiveExtractionBudget::default();
 
     let reader: Box<dyn Read> = if is_gz {
-        Box::new(flate2::read::GzDecoder::new(Cursor::new(data)))
+        Box::new(BoundedCountingReader {
+            inner: flate2::read::GzDecoder::new(Cursor::new(data)),
+            count: 0,
+            limit: MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES,
+        })
     } else {
         Box::new(Cursor::new(data))
     };
@@ -394,6 +447,10 @@ fn extract_tar(
     for entry_res in entries {
         let mut entry = entry_res.map_err(|err| format!("Entri TAR invalid: {err}"))?;
         let entry_type = entry.header().entry_type();
+
+        if entry_type.is_symlink() || entry_type.is_hard_link() {
+            continue;
+        }
 
         let path_str = entry
             .path()
@@ -412,56 +469,14 @@ fn extract_tar(
             continue;
         }
 
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
-            continue;
-        }
-
-        let mut category = classify_archive_entry(&path);
-        let mut text_content = None;
-
-        if category == ArchiveEntryCategory::Text {
-            if budget_exhausted.is_some() {
-                // Skip reading content once budget is hit
-            } else if size as usize > MAX_ARCHIVE_SINGLE_ENTRY_BYTES {
-                category = ArchiveEntryCategory::Binary;
-            } else if total_uncompressed.saturating_add(size as usize)
-                > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES
-            {
-                budget_exhausted = Some(
-                    "Batas dekompresi 30 MB tercapai; sisa berkas hanya dicatat pada struktur direktori."
-                        .to_string(),
-                );
-            } else {
-                let mut buf = Vec::with_capacity(size.min(65536) as usize);
-                let read_res = (&mut entry)
-                    .take(MAX_ARCHIVE_SINGLE_ENTRY_BYTES as u64 + 1)
-                    .read_to_end(&mut buf);
-
-                if let Ok(bytes_read) = read_res {
-                    total_uncompressed = total_uncompressed.saturating_add(bytes_read);
-                    if bytes_read <= MAX_ARCHIVE_SINGLE_ENTRY_BYTES && is_valid_text_bytes(&buf) {
-                        if let Ok(text) = String::from_utf8(buf) {
-                            if total_extracted_chars.saturating_add(text.len())
-                                > MAX_ARCHIVE_OUTPUT_CHARS
-                            {
-                                budget_exhausted = Some(
-                                    "Batas kapasitas konteks teks tercapai; sisa berkas hanya dicatat pada struktur direktori."
-                                        .to_string(),
-                                );
-                            } else {
-                                total_extracted_chars =
-                                    total_extracted_chars.saturating_add(text.len());
-                                text_content = Some(text);
-                            }
-                        } else {
-                            category = ArchiveEntryCategory::Binary;
-                        }
-                    } else {
-                        category = ArchiveEntryCategory::Binary;
-                    }
-                }
-            }
-        }
+        let initial_category = classify_archive_entry(&path);
+        let (category, text_content) = if initial_category == ArchiveEntryCategory::Text {
+            read_text_entry_bounded(&mut entry, size, &mut budget)
+        } else {
+            // Track skipped non-text sizes against budget
+            budget.total_uncompressed = budget.total_uncompressed.saturating_add(size as usize);
+            (initial_category, None)
+        };
 
         items.push(ExtractedArchiveItem {
             path,
@@ -471,22 +486,28 @@ fn extract_tar(
         });
     }
 
-    Ok((items, budget_exhausted))
+    Ok((items, budget))
 }
 
-fn extract_7z(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, Option<String>), String> {
+fn extract_7z(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, ArchiveExtractionBudget), String> {
     let cursor = Cursor::new(data);
     let len = data.len() as u64;
     let mut reader = sevenz_rust::SevenZReader::new(cursor, len, sevenz_rust::Password::empty())
         .map_err(|err| format!("7Z invalid: {err}"))?;
 
     let mut items = Vec::new();
-    let mut total_uncompressed: usize = 0;
-    let mut total_extracted_chars: usize = 0;
-    let mut budget_exhausted: Option<String> = None;
+    let mut budget = ArchiveExtractionBudget::default();
 
     reader
         .for_each_entries(|entry, entry_reader| {
+            // Skip symlinks (POSIX attribute 0o120000 or Windows 0x400)
+            let is_symlink = entry.has_windows_attributes
+                && (((entry.windows_attributes >> 16) & 0o170000 == 0o120000)
+                    || (entry.windows_attributes & 0x400 != 0));
+            if is_symlink {
+                return Ok(true);
+            }
+
             let path_str = entry.name().to_string();
             let path = sanitize_archive_path(&path_str);
             let size = entry.size();
@@ -502,53 +523,13 @@ fn extract_7z(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, Option<String>)
                 return Ok(true);
             }
 
-            let mut category = classify_archive_entry(&path);
-            let mut text_content = None;
-
-            if category == ArchiveEntryCategory::Text {
-                if budget_exhausted.is_some() {
-                    // Skip reading stream
-                } else if size as usize > MAX_ARCHIVE_SINGLE_ENTRY_BYTES {
-                    category = ArchiveEntryCategory::Binary;
-                } else if total_uncompressed.saturating_add(size as usize)
-                    > MAX_ARCHIVE_TOTAL_UNCOMPRESSED_BYTES
-                {
-                    budget_exhausted = Some(
-                        "Batas dekompresi 30 MB tercapai; sisa berkas hanya dicatat pada struktur direktori."
-                            .to_string(),
-                    );
-                } else {
-                    let mut buf = Vec::with_capacity(size.min(65536) as usize);
-                    let read_res = entry_reader
-                        .take(MAX_ARCHIVE_SINGLE_ENTRY_BYTES as u64 + 1)
-                        .read_to_end(&mut buf);
-
-                    if let Ok(bytes_read) = read_res {
-                        total_uncompressed = total_uncompressed.saturating_add(bytes_read);
-                        if bytes_read <= MAX_ARCHIVE_SINGLE_ENTRY_BYTES && is_valid_text_bytes(&buf)
-                        {
-                            if let Ok(text) = String::from_utf8(buf) {
-                                if total_extracted_chars.saturating_add(text.len())
-                                    > MAX_ARCHIVE_OUTPUT_CHARS
-                                {
-                                    budget_exhausted = Some(
-                                        "Batas kapasitas konteks teks tercapai; sisa berkas hanya dicatat pada struktur direktori."
-                                            .to_string(),
-                                    );
-                                } else {
-                                    total_extracted_chars =
-                                        total_extracted_chars.saturating_add(text.len());
-                                    text_content = Some(text);
-                                }
-                            } else {
-                                category = ArchiveEntryCategory::Binary;
-                            }
-                        } else {
-                            category = ArchiveEntryCategory::Binary;
-                        }
-                    }
-                }
-            }
+            let initial_category = classify_archive_entry(&path);
+            let (category, text_content) = if initial_category == ArchiveEntryCategory::Text {
+                read_text_entry_bounded(entry_reader, size, &mut budget)
+            } else {
+                budget.total_uncompressed = budget.total_uncompressed.saturating_add(size as usize);
+                (initial_category, None)
+            };
 
             items.push(ExtractedArchiveItem {
                 path,
@@ -561,7 +542,7 @@ fn extract_7z(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, Option<String>)
         })
         .map_err(|err| format!("Gagal mengekstrak berkas 7Z: {err}"))?;
 
-    Ok((items, budget_exhausted))
+    Ok((items, budget))
 }
 
 fn is_valid_text_bytes(bytes: &[u8]) -> bool {
@@ -606,6 +587,12 @@ pub fn build_archive_text_output(
                 }
                 ArchiveEntryCategory::Binary => {
                     out.push_str(&format!("📄 {} ({size_str}) [Biner / Media]\n", item.path));
+                }
+                ArchiveEntryCategory::OversizedText => {
+                    out.push_str(&format!(
+                        "📄 {} ({size_str}) [Teks - Melebihi batas 2 MB]\n",
+                        item.path
+                    ));
                 }
                 ArchiveEntryCategory::Text => {
                     out.push_str(&format!("📄 {} ({size_str})\n", item.path));
@@ -660,6 +647,11 @@ mod tests {
         assert_eq!(
             detect_archive_kind("", "package.tgz"),
             Some(ArchiveKind::TarGz)
+        );
+        // Generic .gz without tar extension must NOT map to TarGz
+        assert_eq!(
+            detect_archive_kind("application/gzip", "access.log.gz"),
+            None
         );
         assert_eq!(
             detect_archive_kind("application/x-7z-compressed", "docs.7z"),
@@ -736,6 +728,29 @@ mod tests {
         assert!(result.contains("# Hello Xiao"));
         assert!(result.contains("--- BERKAS: data.json ---"));
         assert!(result.contains("{\"version\": 1}"));
+    }
+
+    #[test]
+    fn oversized_text_file_is_marked_properly_in_manifest() {
+        let cursor = Cursor::new(Vec::<u8>::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        writer.start_file("huge.log", options).unwrap();
+        // Write 2.5 MB of spaces
+        let chunk = vec![b' '; 512 * 1024];
+        for _ in 0..5 {
+            writer.write_all(&chunk).unwrap();
+        }
+
+        let bytes = writer.finish().unwrap().into_inner();
+        let result = extract_archive(&bytes, ArchiveKind::Zip, "large.zip").unwrap();
+
+        assert!(result.contains("huge.log"));
+        assert!(result.contains("[Teks - Melebihi batas 2 MB]"));
+        // The file content itself should NOT be extracted to context
+        assert!(!result.contains("--- BERKAS: huge.log ---"));
     }
 
     #[test]

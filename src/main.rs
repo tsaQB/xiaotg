@@ -1322,13 +1322,6 @@ fn command_args<'a>(text: &'a str, command: &str) -> Option<&'a str> {
     Some(mention[mention_end..].trim_start())
 }
 
-/// Xiao operates as a pure zero-slash conversational gateway.
-/// All user messages (including `/start`) route to `UpdateLane::Generation`
-/// so the LLM responds naturally.
-fn is_control_message_text(_text: &str) -> bool {
-    false
-}
-
 async fn classify_update_lane(_ai_service: &AIChatService, update: &Update) -> UpdateLane {
     if update.stopped_message_generation.is_some() || update.callback_query.is_some() {
         return UpdateLane::Control;
@@ -1348,18 +1341,8 @@ async fn classify_update_lane(_ai_service: &AIChatService, update: &Update) -> U
         return UpdateLane::Generation;
     }
 
-    let text = message
-        .text
-        .as_deref()
-        .or(message.caption.as_deref())
-        .unwrap_or("")
-        .trim();
-
-    if is_control_message_text(text) {
-        UpdateLane::Control
-    } else {
-        UpdateLane::Generation
-    }
+    // In zero-slash gateway architecture, all text and prompt messages route to Generation.
+    UpdateLane::Generation
 }
 
 async fn process_durable_update(
@@ -2259,8 +2242,9 @@ async fn main() {
 mod update_lane_tests {
     use super::*;
 
-    #[test]
-    fn pure_zero_slash_routes_all_text_to_generation_lane() {
+    #[tokio::test]
+    async fn pure_zero_slash_routes_all_text_to_generation_lane() {
+        let ai = Arc::new(AIChatService::new());
         for text in [
             "/start",
             "/start@xiaobot",
@@ -2274,7 +2258,22 @@ mod update_lane_tests {
             "/help",
             "/clear",
         ] {
-            assert!(!is_control_message_text(text), "{text}");
+            let update: Update = serde_json::from_value(json!({
+                "update_id": 100,
+                "message": {
+                    "message_id": 1,
+                    "date": 1700000000,
+                    "chat": { "id": 12345, "type": "private" },
+                    "from": { "id": 12345, "is_bot": false, "first_name": "Test" },
+                    "text": text
+                }
+            }))
+            .unwrap();
+            assert_eq!(
+                classify_update_lane(&ai, &update).await,
+                UpdateLane::Generation,
+                "{text}"
+            );
         }
     }
 
