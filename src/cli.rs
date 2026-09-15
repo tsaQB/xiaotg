@@ -1016,10 +1016,7 @@ async fn run_cli_gateway_telegram_submenu() {
             owner_id
                 .map(|i| i.to_string())
                 .unwrap_or_else(|| "Belum diset".to_string()),
-            match access_mode {
-                crate::ai::storage::AccessMode::SingleOwner => "Single-Owner (Khusus Owner)",
-                crate::ai::storage::AccessMode::Public => "Public (Semua Pengguna)",
-            },
+            access_mode.full_display_name(),
             daily_quota,
         );
 
@@ -1029,10 +1026,7 @@ async fn run_cli_gateway_telegram_submenu() {
             "Ubah Telegram Owner User ID".to_string(),
             format!(
                 "Ganti Mode Akses [Saat ini: {}]",
-                match access_mode {
-                    crate::ai::storage::AccessMode::SingleOwner => "Single-Owner",
-                    crate::ai::storage::AccessMode::Public => "Public",
-                }
+                access_mode.display_name()
             ),
             format!("Atur Kuota Harian Publik [Saat ini: {daily_quota}]"),
             "Lihat Rekap Penggunaan Kuota Hari Ini".to_string(),
@@ -1059,11 +1053,8 @@ async fn run_cli_gateway_telegram_submenu() {
                 run_cli_telegram_owner(None).await;
             }
             3 => {
-                let target_mode = match access_mode {
-                    crate::ai::storage::AccessMode::SingleOwner => "public",
-                    crate::ai::storage::AccessMode::Public => "single",
-                };
-                run_cli_gateway_mode(Some(target_mode)).await;
+                let target_mode = access_mode.toggle();
+                run_cli_gateway_mode(Some(target_mode.as_str())).await;
                 print!("\x1b[38;5;244mTekan Enter untuk melanjutkan...\x1b[0m");
                 let _ = io::stdout().flush();
                 let mut tmp = String::new();

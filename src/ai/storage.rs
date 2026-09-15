@@ -2161,6 +2161,36 @@ impl AccessMode {
         }
     }
 
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            AccessMode::SingleOwner => "Single-Owner",
+            AccessMode::Public => "Public",
+        }
+    }
+
+    pub fn full_display_name(&self) -> &'static str {
+        match self {
+            AccessMode::SingleOwner => "Single-Owner (Khusus Owner)",
+            AccessMode::Public => "Public (Semua Pengguna)",
+        }
+    }
+
+    pub fn is_public(&self) -> bool {
+        matches!(self, AccessMode::Public)
+    }
+
+    #[allow(dead_code)]
+    pub fn is_single_owner(&self) -> bool {
+        matches!(self, AccessMode::SingleOwner)
+    }
+
+    pub fn toggle(&self) -> Self {
+        match self {
+            AccessMode::SingleOwner => AccessMode::Public,
+            AccessMode::Public => AccessMode::SingleOwner,
+        }
+    }
+
     pub fn parse_mode(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "single" | "single_owner" | "single-owner" | "owner" => Some(AccessMode::SingleOwner),
@@ -2191,6 +2221,7 @@ pub fn save_public_daily_quota(quota: u32) -> std::io::Result<()> {
     save_app_setting(SETTING_PUBLIC_DAILY_QUOTA, &quota.to_string())
 }
 
+#[allow(dead_code)]
 pub fn check_and_increment_user_quota_on_conn(
     conn: &Connection,
     user_id: u64,
@@ -2224,6 +2255,7 @@ pub fn check_and_increment_user_quota_on_conn(
     Ok((true, new_count))
 }
 
+#[allow(dead_code)]
 pub fn check_and_increment_user_quota(
     user_id: u64,
     date: &str,
@@ -2234,6 +2266,7 @@ pub fn check_and_increment_user_quota(
     check_and_increment_user_quota_on_conn(&conn, user_id, date, limit, &now_iso)
 }
 
+#[allow(dead_code)]
 pub async fn check_and_increment_user_quota_async(
     user_id: u64,
     date: String,
@@ -2244,6 +2277,37 @@ pub async fn check_and_increment_user_quota_async(
     })
     .await
     .unwrap_or((false, limit))
+}
+
+pub fn increment_user_quota_on_conn(
+    conn: &Connection,
+    user_id: u64,
+    date: &str,
+    now_iso: &str,
+) -> rusqlite::Result<u32> {
+    conn.execute(
+        "INSERT INTO user_quotas(user_id, usage_date, request_count, last_request_at)
+         VALUES(?1, ?2, 1, ?3)
+         ON CONFLICT(user_id, usage_date) DO UPDATE SET
+             request_count = request_count + 1,
+             last_request_at = excluded.last_request_at",
+        params![user_id as i64, date, now_iso],
+    )?;
+    get_user_quota_usage_on_conn(conn, user_id, date)
+}
+
+pub fn increment_user_quota(user_id: u64, date: &str) -> rusqlite::Result<u32> {
+    let conn = open_session_db()?;
+    let now_iso = Local::now().to_rfc3339();
+    increment_user_quota_on_conn(&conn, user_id, date, &now_iso)
+}
+
+pub async fn increment_user_quota_async(user_id: u64, date: String) -> u32 {
+    run_db("increment_user_quota", move || {
+        increment_user_quota(user_id, &date)
+    })
+    .await
+    .unwrap_or(0)
 }
 
 pub fn get_user_quota_usage_on_conn(
@@ -3275,11 +3339,18 @@ mod tests {
             3
         );
 
+        // increment_user_quota_on_conn test
+        let new_user = 12345;
+        let inc_count =
+            increment_user_quota_on_conn(&conn, new_user, date, "2026-09-15T12:00:00Z").unwrap();
+        assert_eq!(inc_count, 1);
+        let inc_count2 =
+            increment_user_quota_on_conn(&conn, new_user, date, "2026-09-15T12:01:00Z").unwrap();
+        assert_eq!(inc_count2, 2);
+
         // Summary
         let summary = get_daily_quota_summary_on_conn(&conn, date).unwrap();
-        assert_eq!(summary.len(), 1);
-        assert_eq!(summary[0].user_id, user_id);
-        assert_eq!(summary[0].request_count, 3);
+        assert_eq!(summary.len(), 2);
     }
 
     #[test]

@@ -70,15 +70,20 @@ fn build_audio_chat_input<'a>(
 
 #[derive(Clone, Debug)]
 struct AccessPolicy {
-    mode: ai::storage::AccessMode,
+    mode_override: Option<ai::storage::AccessMode>,
     owner_user_id: i64,
     allowed_chat_ids: HashSet<i64>,
     bot_username: Option<String>,
 }
 
 impl AccessPolicy {
+    fn current_mode(&self) -> ai::storage::AccessMode {
+        self.mode_override
+            .unwrap_or_else(ai::storage::load_access_mode)
+    }
+
     fn allows(&self, user_id: i64, chat_id: i64) -> bool {
-        match self.mode {
+        match self.current_mode() {
             ai::storage::AccessMode::SingleOwner => {
                 if user_id != self.owner_user_id {
                     return false;
@@ -91,31 +96,80 @@ impl AccessPolicy {
                 self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
             }
             ai::storage::AccessMode::Public => {
-                // In public mode, any user is allowed in PM or groups,
-                // subject to allowed_chat_ids whitelist if configured.
-                self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
+                // In public mode, PM (chat_id > 0) is accessible to everyone.
+                // Group chats (chat_id < 0) are allowed if no whitelist or if chat_id is whitelisted.
+                if chat_id > 0 {
+                    true
+                } else {
+                    self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
+                }
             }
         }
     }
 
     fn allows_stop_chat(&self, chat_id: i64) -> bool {
-        match self.mode {
+        match self.current_mode() {
             ai::storage::AccessMode::SingleOwner => {
                 // MessageGenerationStopped does not identify who pressed Stop. To prevent
                 // another group participant from cancelling the owner's request, native
                 // Stop is accepted only in the owner's private chat.
                 chat_id == self.owner_user_id
             }
-            ai::storage::AccessMode::Public => true,
+            ai::storage::AccessMode::Public => {
+                // In public mode, any private chat (chat_id > 0) is allowed to cancel its
+                // own generation. Group chats (chat_id < 0) are rejected because Telegram
+                // stop updates omit user_id, preventing cross-user cancellation in groups.
+                chat_id > 0
+            }
         }
     }
 }
 
-type UserCooldownTracker = Arc<tokio::sync::Mutex<HashMap<i64, Instant>>>;
+#[derive(Clone, Default)]
+struct CooldownTracker {
+    inner: Arc<tokio::sync::Mutex<HashMap<i64, Instant>>>,
+}
+
+impl CooldownTracker {
+    fn new() -> Self {
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    async fn check_and_update(&self, user_id: i64, cooldown: Duration) -> bool {
+        let mut tracker = self.inner.lock().await;
+        let now = Instant::now();
+
+        // Evict stale entries when map exceeds 500 users to prevent unbounded memory growth
+        if tracker.len() > 500 {
+            tracker.retain(|_, last_at| now.duration_since(*last_at) < Duration::from_secs(60));
+        }
+
+        if let Some(last_at) = tracker.get(&user_id) {
+            if now.duration_since(*last_at) < cooldown {
+                return true; // is on cooldown
+            }
+        }
+        tracker.insert(user_id, now);
+        false
+    }
+}
+
+#[derive(Clone)]
+struct AppContext {
+    bot: TelegramBotClient,
+    ai_service: Arc<AIChatService>,
+    user_last_image_prompt: UserLastImagePrompt,
+    access: Arc<AccessPolicy>,
+    cooldown_tracker: CooldownTracker,
+    generation_semaphore: Arc<tokio::sync::Semaphore>,
+}
 
 fn prepare_incoming_chat_text(
     raw_text: &str,
     is_group: bool,
+    is_owner: bool,
     bot_username: Option<&str>,
     is_reply_to_bot: bool,
 ) -> Option<String> {
@@ -125,7 +179,11 @@ fn prepare_incoming_chat_text(
     }
 
     let Some(bot_name) = bot_username else {
-        return Some(trimmed.to_string());
+        // Without a bot username in group: owner or commands or replies are accepted
+        if is_owner || is_reply_to_bot || trimmed.starts_with('/') {
+            return Some(trimmed.to_string());
+        }
+        return None;
     };
 
     let bot_tag = format!("@{bot_name}");
@@ -159,8 +217,11 @@ fn prepare_incoming_chat_text(
             })
             .collect();
         Some(remaining.join(" "))
-    } else {
+    } else if is_reply_to_bot || trimmed.starts_with('/') || is_owner {
         Some(trimmed.to_string())
+    } else {
+        // In group chats, non-owner messages without bot mention or reply are ignored
+        None
     }
 }
 
@@ -306,12 +367,22 @@ async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMe
                         &match ai::storage::load_access_mode() {
                             ai::storage::AccessMode::SingleOwner => "Single-Owner".to_string(),
                             ai::storage::AccessMode::Public => {
-                                let limit = ai::storage::load_public_daily_quota();
-                                let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-                                let used =
-                                    ai::storage::get_user_quota_usage_async(user_id as u64, today)
-                                        .await;
-                                format!("Public ({used}/{limit} req)")
+                                if Some(user_id) == get_configured_owner_id() {
+                                    "Public (Owner - Unlimited)".to_string()
+                                } else {
+                                    let limit = ai::storage::load_public_daily_quota();
+                                    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                                    let used = if user_id > 0 {
+                                        ai::storage::get_user_quota_usage_async(
+                                            user_id as u64,
+                                            today,
+                                        )
+                                        .await
+                                    } else {
+                                        0
+                                    };
+                                    format!("Public ({used}/{limit} req)")
+                                }
                             }
                         },
                         false,
@@ -948,6 +1019,7 @@ async fn handle_image_generation(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
     user_last_image_prompt: &UserLastImagePrompt,
+    generation_semaphore: &Arc<tokio::sync::Semaphore>,
     chat_id: i64,
     thread_id: i64,
     user_id: i64,
@@ -956,6 +1028,7 @@ async fn handle_image_generation(
 ) {
     let generation_lock = ai_service.generation_lock(chat_id, thread_id).await;
     let _generation_guard = generation_lock.lock().await;
+    let _concurrency_permit = generation_semaphore.acquire().await.ok();
 
     let mut clean_prompt = prompt.trim().to_string();
 
@@ -1228,6 +1301,9 @@ async fn handle_image_generation(
         return;
     }
 
+    drop(_concurrency_permit);
+    drop(_generation_guard);
+
     if let Some(explanation_prompt) = explanation_prompt
         .map(str::trim)
         .filter(|prompt| !prompt.is_empty())
@@ -1235,6 +1311,7 @@ async fn handle_image_generation(
         handle_ai_chat(
             bot,
             ai_service,
+            generation_semaphore,
             chat_id,
             thread_id,
             user_id,
@@ -1264,6 +1341,7 @@ async fn handle_image_generation(
 async fn handle_ai_chat(
     bot: &TelegramBotClient,
     ai_service: &AIChatService,
+    generation_semaphore: &Arc<tokio::sync::Semaphore>,
     chat_id: i64,
     thread_id: i64,
     user_id: i64,
@@ -1285,6 +1363,7 @@ async fn handle_ai_chat(
     } = input;
     let generation_lock = ai_service.generation_lock(chat_id, thread_id).await;
     let _generation_guard = generation_lock.lock().await;
+    let _concurrency_permit = generation_semaphore.acquire().await.ok();
 
     let draft_id: i64 = rand::thread_rng().gen_range(100000..999999);
     let mut cancel_rx = ai_service.begin_generation(chat_id, draft_id).await;
@@ -1495,32 +1574,14 @@ async fn classify_update_lane(_ai_service: &AIChatService, update: &Update) -> U
     }
 }
 
-async fn process_durable_update(
-    bot: &TelegramBotClient,
-    ai_service: &AIChatService,
-    user_last_image_prompt: &UserLastImagePrompt,
-    access: &AccessPolicy,
-    cooldown_tracker: &UserCooldownTracker,
-    update: Update,
-) {
+async fn process_durable_update(ctx: &AppContext, update: Update) {
     let update_id = update.update_id;
     if !ai::storage::mark_telegram_processing_async(update_id).await {
         return;
     }
 
     let delivery_context = delivery_context_for_update(&update);
-    TelegramBotClient::with_delivery_context(
-        delivery_context,
-        handle_update(
-            bot,
-            ai_service,
-            user_last_image_prompt,
-            access,
-            cooldown_tracker,
-            update,
-        ),
-    )
-    .await;
+    TelegramBotClient::with_delivery_context(delivery_context, handle_update(ctx, update)).await;
 
     if !ai::storage::mark_telegram_processed_async(update_id).await {
         warn!("Gagal menyelesaikan durable Telegram inbox update {update_id}");
@@ -1627,14 +1688,14 @@ fn classify_telegram_document_media(
     }
 }
 
-async fn handle_update(
-    bot: &TelegramBotClient,
-    ai_service: &AIChatService,
-    user_last_image_prompt: &UserLastImagePrompt,
-    access: &AccessPolicy,
-    cooldown_tracker: &UserCooldownTracker,
-    update: Update,
-) {
+async fn handle_update(ctx: &AppContext, update: Update) {
+    let bot = &ctx.bot;
+    let ai_service = &ctx.ai_service;
+    let user_last_image_prompt = &ctx.user_last_image_prompt;
+    let access = &ctx.access;
+    let cooldown_tracker = &ctx.cooldown_tracker;
+    let generation_semaphore = &ctx.generation_semaphore;
+
     if let Some(stopped) = update.stopped_message_generation.as_ref() {
         if access.allows_stop_chat(stopped.chat.id) {
             let _ = ai_service
@@ -1646,15 +1707,18 @@ async fn handle_update(
     if let Some(msg) = update.message {
         let chat_id = msg.chat.id;
         let thread_id = msg.message_thread_id.unwrap_or(0);
-        let user_id = msg.from.as_ref().map(|u| u.id).unwrap_or(chat_id);
+        let Some(from_user) = msg.from.as_ref() else {
+            // Drop anonymous channel posts or system updates without an individual sender
+            return;
+        };
+        let user_id = from_user.id;
+        if user_id <= 0 {
+            return;
+        }
         if !access.allows(user_id, chat_id) {
             return;
         }
-        let _user_name = msg
-            .from
-            .as_ref()
-            .map(|u| u.first_name.as_str())
-            .unwrap_or("Pengguna");
+        let _user_name = from_user.first_name.as_str();
         let raw_text = msg
             .text
             .as_deref()
@@ -1663,6 +1727,7 @@ async fn handle_update(
             .trim();
 
         let is_group = chat_id != user_id;
+        let is_owner = user_id == access.owner_user_id;
         let is_reply_to_bot = msg
             .reply_to_message
             .as_ref()
@@ -1682,6 +1747,7 @@ async fn handle_update(
         let Some(text) = prepare_incoming_chat_text(
             raw_text,
             is_group,
+            is_owner,
             access.bot_username.as_deref(),
             is_reply_to_bot,
         ) else {
@@ -1694,26 +1760,16 @@ async fn handle_update(
             return;
         }
 
-        // AccessMode::Public Rate-Limiting & Quota Enforcement
-        if access.mode == ai::storage::AccessMode::Public && user_id != access.owner_user_id {
-            // Anti-spam Cooldown (3 seconds)
-            let is_on_cooldown = {
-                let mut tracker = cooldown_tracker.lock().await;
-                let now = Instant::now();
-                if let Some(last_at) = tracker.get(&user_id) {
-                    if now.duration_since(*last_at) < Duration::from_secs(3) {
-                        true
-                    } else {
-                        tracker.insert(user_id, now);
-                        false
-                    }
-                } else {
-                    tracker.insert(user_id, now);
-                    false
-                }
-            };
+        let is_public_mode = access.current_mode().is_public();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
-            if is_on_cooldown {
+        // AccessMode::Public Rate-Limiting & Quota Pre-Check
+        if is_public_mode && !is_owner {
+            // Anti-spam Cooldown (3 seconds)
+            if cooldown_tracker
+                .check_and_update(user_id, Duration::from_secs(3))
+                .await
+            {
                 let _ = bot
                     .send_message(
                         chat_id,
@@ -1727,17 +1783,11 @@ async fn handle_update(
                 return;
             }
 
-            // Daily Quota Tracking (reset at midnight 00:00)
-            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+            // Daily Quota Pre-Check (do NOT increment until generation actually starts)
             let daily_limit = ai::storage::load_public_daily_quota();
-            let (allowed, _count) = ai::storage::check_and_increment_user_quota_async(
-                user_id as u64,
-                today,
-                daily_limit,
-            )
-            .await;
-
-            if !allowed {
+            let current_usage =
+                ai::storage::get_user_quota_usage_async(user_id as u64, today.clone()).await;
+            if current_usage >= daily_limit {
                 let _ = bot
                     .send_message(
                         chat_id,
@@ -1986,7 +2036,19 @@ async fn handle_update(
                 audio_mime.as_deref(),
                 doc_name.as_deref(),
             );
-            handle_ai_chat(bot, ai_service, chat_id, thread_id, user_id, chat_input).await;
+            if is_public_mode && !is_owner {
+                ai::storage::increment_user_quota_async(user_id as u64, today.clone()).await;
+            }
+            handle_ai_chat(
+                bot,
+                ai_service,
+                generation_semaphore,
+                chat_id,
+                thread_id,
+                user_id,
+                chat_input,
+            )
+            .await;
             return;
         }
 
@@ -1998,9 +2060,13 @@ async fn handle_update(
                 "Tonton dan analisis rekaman video ini secara mendalam. Jelaskan isi visual, alur peristiwa, teks di layar, dan suara di dalamnya.".to_string()
             };
 
+            if is_public_mode && !is_owner {
+                ai::storage::increment_user_quota_async(user_id as u64, today.clone()).await;
+            }
             handle_ai_chat(
                 bot,
                 ai_service,
+                generation_semaphore,
                 chat_id,
                 thread_id,
                 user_id,
@@ -2059,10 +2125,14 @@ async fn handle_update(
         };
 
         if let Some(intent) = auto_image_intent {
+            if is_public_mode && !is_owner {
+                ai::storage::increment_user_quota_async(user_id as u64, today.clone()).await;
+            }
             handle_image_generation(
                 bot,
                 ai_service,
                 user_last_image_prompt,
+                generation_semaphore,
                 chat_id,
                 thread_id,
                 user_id,
@@ -2071,9 +2141,13 @@ async fn handle_update(
             )
             .await;
         } else {
+            if is_public_mode && !is_owner {
+                ai::storage::increment_user_quota_async(user_id as u64, today.clone()).await;
+            }
             handle_ai_chat(
                 bot,
                 ai_service,
+                generation_semaphore,
                 chat_id,
                 thread_id,
                 user_id,
@@ -2244,14 +2318,13 @@ async fn main() {
         }
     };
 
-    let access_mode = ai::storage::load_access_mode();
-    info!("Mode akses Telegram Gateway: {:?}", access_mode);
     let access = Arc::new(AccessPolicy {
-        mode: access_mode,
+        mode_override: None,
         owner_user_id,
         allowed_chat_ids: get_allowed_chat_ids(),
         bot_username,
     });
+    info!("Mode akses Telegram Gateway: {:?}", access.current_mode());
 
     // Register Bot Commands
     let commands = vec![BotCommand::ephemeral("start", "Start chatting with Xiao")];
@@ -2264,51 +2337,32 @@ async fn main() {
 
     let (generation_tx, mut generation_rx) = tokio::sync::mpsc::channel::<Update>(64);
     let (control_tx, mut control_rx) = tokio::sync::mpsc::channel::<Update>(64);
-    let cooldown_tracker: UserCooldownTracker = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let cooldown_tracker = CooldownTracker::new();
     let generation_concurrency = Arc::new(tokio::sync::Semaphore::new(4));
 
-    let generation_bot = bot.clone();
-    let generation_ai = Arc::clone(&ai_service);
-    let generation_last_image = Arc::clone(&user_last_image_prompt);
-    let generation_access = Arc::clone(&access);
-    let generation_cooldown = Arc::clone(&cooldown_tracker);
-    let generation_sem = Arc::clone(&generation_concurrency);
+    let app_ctx = AppContext {
+        bot: bot.clone(),
+        ai_service: Arc::clone(&ai_service),
+        user_last_image_prompt: Arc::clone(&user_last_image_prompt),
+        access: Arc::clone(&access),
+        cooldown_tracker,
+        generation_semaphore: Arc::clone(&generation_concurrency),
+    };
 
+    let generation_ctx = app_ctx.clone();
     let generation_worker = tokio::spawn(async move {
         while let Some(update) = generation_rx.recv().await {
-            let permit = match generation_sem.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => break,
-            };
-            let b = generation_bot.clone();
-            let ai = Arc::clone(&generation_ai);
-            let img = Arc::clone(&generation_last_image);
-            let acc = Arc::clone(&generation_access);
-            let cd = Arc::clone(&generation_cooldown);
-
+            let ctx = generation_ctx.clone();
             tokio::spawn(async move {
-                let _permit = permit;
-                process_durable_update(&b, &ai, &img, &acc, &cd, update).await;
+                process_durable_update(&ctx, update).await;
             });
         }
     });
 
-    let control_bot = bot.clone();
-    let control_ai = Arc::clone(&ai_service);
-    let control_last_image = Arc::clone(&user_last_image_prompt);
-    let control_access = Arc::clone(&access);
-    let control_cooldown = Arc::clone(&cooldown_tracker);
+    let control_ctx = app_ctx.clone();
     let control_worker = tokio::spawn(async move {
         while let Some(update) = control_rx.recv().await {
-            process_durable_update(
-                &control_bot,
-                &control_ai,
-                &control_last_image,
-                &control_access,
-                &control_cooldown,
-                update,
-            )
-            .await;
+            process_durable_update(&control_ctx, update).await;
         }
     });
 
@@ -2332,15 +2386,7 @@ async fn main() {
                 Ok(update) => {
                     if update.stopped_message_generation.is_some() {
                         // Native Stop bypasses both queues for immediate cancellation.
-                        process_durable_update(
-                            &bot,
-                            &ai_service,
-                            &user_last_image_prompt,
-                            &access,
-                            &cooldown_tracker,
-                            update,
-                        )
-                        .await;
+                        process_durable_update(&app_ctx, update).await;
                     } else {
                         let lane = classify_update_lane(&ai_service, &update).await;
                         let send_result = match lane {
@@ -2414,15 +2460,7 @@ async fn main() {
                                 if update.stopped_message_generation.is_some() {
                                     // Native Stop bypasses both queues so cancellation cannot be
                                     // blocked by either control work or an active generation.
-                                    process_durable_update(
-                                        &bot,
-                                        &ai_service,
-                                        &user_last_image_prompt,
-                                        &access,
-                                        &cooldown_tracker,
-                                        update,
-                                    )
-                                    .await;
+                                    process_durable_update(&app_ctx, update).await;
                                 } else {
                                     let lane = classify_update_lane(&ai_service, &update).await;
                                     let send_result = match lane {
@@ -2598,7 +2636,7 @@ mod update_lane_tests {
     #[test]
     fn access_policy_allows_native_stop_only_in_owner_private_chat() {
         let policy = AccessPolicy {
-            mode: ai::storage::AccessMode::SingleOwner,
+            mode_override: Some(ai::storage::AccessMode::SingleOwner),
             owner_user_id: 42,
             allowed_chat_ids: [100, 200].into_iter().collect(),
             bot_username: Some("xiao_bot".to_string()),
@@ -2612,7 +2650,7 @@ mod update_lane_tests {
     #[test]
     fn access_policy_allows_owner_in_private_and_groups_when_whitelist_empty() {
         let policy = AccessPolicy {
-            mode: ai::storage::AccessMode::SingleOwner,
+            mode_override: Some(ai::storage::AccessMode::SingleOwner),
             owner_user_id: 42,
             allowed_chat_ids: HashSet::new(),
             bot_username: Some("Sms2tg_bot".to_string()),
@@ -2629,7 +2667,7 @@ mod update_lane_tests {
     #[test]
     fn access_policy_public_mode_allows_all_users() {
         let policy = AccessPolicy {
-            mode: ai::storage::AccessMode::Public,
+            mode_override: Some(ai::storage::AccessMode::Public),
             owner_user_id: 42,
             allowed_chat_ids: HashSet::new(),
             bot_username: Some("Sms2tg_bot".to_string()),
@@ -2640,15 +2678,16 @@ mod update_lane_tests {
         // Public non-owners allowed
         assert!(policy.allows(999, 999));
         assert!(policy.allows(999, -1001234567890));
-        // Native stop allowed for anyone in public mode
+        // Native stop allowed for anyone in public mode in private chats
         assert!(policy.allows_stop_chat(999));
-        assert!(policy.allows_stop_chat(-1001234567890));
+        // Native stop rejected in group chats to protect cross-user cancellation
+        assert!(!policy.allows_stop_chat(-1001234567890));
     }
 
     #[test]
     fn access_policy_enforces_whitelist_when_configured() {
         let policy = AccessPolicy {
-            mode: ai::storage::AccessMode::SingleOwner,
+            mode_override: Some(ai::storage::AccessMode::SingleOwner),
             owner_user_id: 42,
             allowed_chat_ids: [-100111, -100222].into_iter().collect(),
             bot_username: Some("Sms2tg_bot".to_string()),
@@ -2669,43 +2708,47 @@ mod update_lane_tests {
         let bot_name = "Sms2tg_bot";
         // Private chat keeps text as is
         assert_eq!(
-            prepare_incoming_chat_text("Hai", false, Some(bot_name), false),
+            prepare_incoming_chat_text("Hai", false, false, Some(bot_name), false),
             Some("Hai".to_string())
         );
 
-        // Group chat with no mention to anyone: responds
+        // Group chat with no mention: owner responds, non-owner is ignored
         assert_eq!(
-            prepare_incoming_chat_text("Hai", true, Some(bot_name), false),
+            prepare_incoming_chat_text("Hai", true, true, Some(bot_name), false),
             Some("Hai".to_string())
         );
-
-        // Group chat mentioning this bot: strips mention
         assert_eq!(
-            prepare_incoming_chat_text("Tes @Sms2tg_bot", true, Some(bot_name), false),
+            prepare_incoming_chat_text("Hai", true, false, Some(bot_name), false),
+            None
+        );
+
+        // Group chat mentioning this bot: strips mention for non-owner
+        assert_eq!(
+            prepare_incoming_chat_text("Tes @Sms2tg_bot", true, false, Some(bot_name), false),
             Some("Tes".to_string())
         );
         assert_eq!(
-            prepare_incoming_chat_text("@Sms2tg_bot /start", true, Some(bot_name), false),
+            prepare_incoming_chat_text("@Sms2tg_bot /start", true, false, Some(bot_name), false),
             Some("/start".to_string())
         );
         assert_eq!(
-            prepare_incoming_chat_text("Hello @Sms2tg_bot", true, Some(bot_name), false),
+            prepare_incoming_chat_text("Hello @Sms2tg_bot", true, false, Some(bot_name), false),
             Some("Hello".to_string())
         );
         assert_eq!(
-            prepare_incoming_chat_text("Hi @sms2tg_bot", true, Some(bot_name), false),
+            prepare_incoming_chat_text("Hi @sms2tg_bot", true, false, Some(bot_name), false),
             Some("Hi".to_string())
         );
 
         // Group chat mentioning another user/bot: ignored
         assert_eq!(
-            prepare_incoming_chat_text("Hai @mira", true, Some(bot_name), false),
+            prepare_incoming_chat_text("Hai @mira", true, false, Some(bot_name), false),
             None
         );
 
         // Group chat replying to bot: responded even without mention
         assert_eq!(
-            prepare_incoming_chat_text("Jawaban bagus", true, Some(bot_name), true),
+            prepare_incoming_chat_text("Jawaban bagus", true, false, Some(bot_name), true),
             Some("Jawaban bagus".to_string())
         );
     }
