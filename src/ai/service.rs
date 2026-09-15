@@ -2166,7 +2166,9 @@ impl AIChatService {
                     - Video Streaming Web (YouTube, Vimeo, Twitch): gunakan tautan teks standar [Judul Video](https://youtube.com/...) agar Telegram otomatis memunculkan rich link preview interaktif.\n\
                     - Peta/Lokasi: [map: latitude, longitude]\n\
                     - Dokumen: [document: Nama Dokumen](https://url-dokumen)\n\
-                    Jangan pernah menampilkan tag internal seperti <think>, <thought>, <tool_call>, atau blok JSON raw ke pengguna.".to_string();
+                    Jangan pernah menampilkan tag internal seperti <think>, <thought>, <tool_call>, atau blok JSON raw ke pengguna.\n\
+                    Jika pengguna mengirim '/start' atau salam pembuka di awal sesi baru, sambut mereka dengan hangat, ramah, dan ringkas sebagai asisten AI Xiao tanpa menyebut-nyebut perintah slash. \
+                    Jika pengguna mengirim '/start' ketika percakapan sudah berjalan, berikan rangkuman ringkas mengenai hal-hal yang telah dibahas sebelumnya dan tanyakan kelanjutannya secara natural.".to_string();
 
         if !user_memories.is_empty() {
             system_text.push_str("\n\n[User Profile (Long-Term Memory)]:\n");

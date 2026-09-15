@@ -109,19 +109,19 @@ cargo run -- help                # Print CLI subcommand reference
                                          ▼
                                process_durable_update
                                          │
-          ┌──────────────────────────────┼──────────────────────────────┐
-          │                              │                              │
-     Bot Command                   AI Chat Route                  Natural /image
-       (/start)                 (Text & Multimodal)            (Text-to-Image Flow)
-          │                              │                              │
-          │                              ▼                              ▼
-          │                     AIChatService Core              Image Generation
-          │                      ├── Session Lock                      │
-          │                      ├── Timeline & Draft Ticker           │
-          │                      ├── Tool Loop (Search/Fetch)          │
-          │                      └── OpenAI Streaming (SSE)            │
-          │                                                            │
-          └──────────────────────────────┬─────────────────────────────┘
+                         ┌───────────────┴───────────────┐
+                         │                               │
+                   AI Chat Route                   Natural /image
+            (Text, /start, & Multimodal)        (Text-to-Image Flow)
+                         │                               │
+                         ▼                               ▼
+                AIChatService Core               Image Generation
+                 ├── Session Lock                        │
+                 ├── Timeline & Draft Ticker             │
+                 ├── Tool Loop (Search/Fetch)            │
+                 └── OpenAI Streaming (SSE)              │
+                         │                               │
+                         └───────────────┬───────────────┘
                                          ▼
                              Telegram Client Transport
                                (sendRichMessage,

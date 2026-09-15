@@ -228,7 +228,7 @@ fn parsed_collage_and_slideshow_serialize_with_10_3_discriminators() {
 }
 
 #[test]
-fn telegram_command_registration_is_exclusively_start() {
+fn telegram_command_registration_is_pure_zero_slash() {
     let source = include_str!("../src/main.rs");
     let cmd_start = source
         .find("// Register Bot Commands")
@@ -238,7 +238,8 @@ fn telegram_command_registration_is_exclusively_start() {
         .map(|offset| cmd_start + offset)
         .expect("bot.set_my_commands call");
     let block = &source[cmd_start..cmd_end];
-    assert!(block.contains("BotCommand::ephemeral(\"start\","));
+    assert!(block.contains("&empty_commands") || block.contains("&[]") || block.contains("vec![]"));
+    assert!(!block.contains("\"start\""));
     assert!(!block.contains("\"menu\""));
     assert!(!block.contains("\"help\""));
     assert!(!block.contains("\"clear\""));

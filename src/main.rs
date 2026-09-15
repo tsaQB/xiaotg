@@ -22,9 +22,7 @@ use tracing::{error, info, warn};
 use ai::service::{GenerationModelSnapshot, ImageGenerationErrorKind, ProbeEvent, ProviderConfig};
 use ai::AIChatService;
 use bot::client::{TelegramBotClient, TelegramDeliveryContext};
-use bot::models::{
-    BotCommand, InputRichMessage, ReplyKeyboardRemove, RichBlock, RichBlockTableCell, Update,
-};
+use bot::models::{BotCommand, InputRichMessage, RichBlock, RichBlockTableCell, Update};
 use parser::build_full_rich_message;
 use timeline::{ExecutionTimeline, ProgressActivity};
 use util::{escape_html, truncate_chars};
@@ -230,81 +228,6 @@ use cli::*;
 // UI Builders
 // ==========================================
 
-async fn build_start_ui(ai_service: &AIChatService, user_id: i64) -> InputRichMessage {
-    let main = ai_service
-        .resolve_model_route_unchecked(ai::service::ModelRole::Main)
-        .await
-        .ok();
-    let stats = ai_service.get_context_stats(user_id).await;
-    let main_model = main
-        .as_ref()
-        .map(|route| route.model.clone())
-        .unwrap_or_else(|| "Not configured".to_string());
-    let provider_name = main
-        .as_ref()
-        .map(|route| route.provider.name.clone())
-        .unwrap_or_else(|| "Not configured".to_string());
-    let context = if main.is_some() {
-        format!(
-            "Ready · ~{} / ~{} tokens",
-            stats.total_tokens, stats.limit_tokens
-        )
-    } else {
-        "Setup required".to_string()
-    };
-
-    InputRichMessage::new(vec![
-        RichBlock::SectionHeading {
-            text: Value::String("xiao".to_string()),
-            level: 1,
-        },
-        RichBlock::Paragraph {
-            text: Value::String("Personal Conversational AI Assistant".to_string()),
-        },
-        RichBlock::Table {
-            cells: vec![
-                vec![
-                    RichBlockTableCell::text_only("Status", true, Some("left")),
-                    RichBlockTableCell::text_only("Current", true, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Main Model", false, Some("left")),
-                    RichBlockTableCell::text_only(&main_model, false, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Provider", false, Some("left")),
-                    RichBlockTableCell::text_only(&provider_name, false, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Memory", false, Some("left")),
-                    RichBlockTableCell::text_only("Hierarchical Tier 1 & 2", false, Some("left")),
-                ],
-                vec![
-                    RichBlockTableCell::text_only("Context", false, Some("left")),
-                    RichBlockTableCell::text_only(&context, false, Some("left")),
-                ],
-            ],
-            has_header: true,
-            is_bordered: true,
-            is_striped: true,
-            is_compact: true,
-            caption: None,
-        },
-        RichBlock::BlockQuotation {
-            blocks: vec![json!({
-                "type":"paragraph",
-                "text":"Kirim pesan teks, pertanyaan, gambar, dokumen, video, atau voice note secara alami.\nXiao mengingat preferensi dan konteks percakapan Anda secara otomatis tanpa perlu perintah menu."
-            })],
-        },
-        RichBlock::Paragraph {
-            text: Value::String(
-                "Konfigurasi model dan status sistem dikelola melalui Xiao CLI di terminal."
-                    .to_string(),
-            ),
-        },
-    ])
-}
-
 #[cfg(test)]
 fn build_help_ui() -> InputRichMessage {
     use bot::models::RichBlockListItem;
@@ -331,9 +254,9 @@ fn build_help_ui() -> InputRichMessage {
             RichBlockTableCell::text_only("Action", true, Some("left")),
         ],
         vec![
-            RichBlockTableCell::text_only("/start", false, Some("left")),
+            RichBlockTableCell::text_only("Teks & Percakapan", false, Some("left")),
             RichBlockTableCell::text_only(
-                "Show assistant status & welcome card",
+                "Percakapan bebas dan sambutan alami tanpa slash command",
                 false,
                 Some("left"),
             ),
@@ -595,23 +518,6 @@ fn build_clear_confirmation_ui() -> InputRichMessage {
             align: Some("center".to_string()),
         },
     ])
-}
-
-async fn send_welcome(
-    bot: &TelegramBotClient,
-    ai_service: &AIChatService,
-    chat_id: i64,
-    user_id: i64,
-) {
-    let rich = build_start_ui(ai_service, user_id).await;
-    let _ = bot
-        .send_rich_message(
-            chat_id,
-            &rich,
-            serde_json::to_value(ReplyKeyboardRemove::new()).ok(),
-            None,
-        )
-        .await;
 }
 
 // ==========================================
@@ -1416,12 +1322,11 @@ fn command_args<'a>(text: &'a str, command: &str) -> Option<&'a str> {
     Some(mention[mention_end..].trim_start())
 }
 
-fn is_control_message_text(text: &str) -> bool {
-    let text = text.trim();
-    if text.is_empty() {
-        return false;
-    }
-    command_matches(text, "/start")
+/// Xiao operates as a pure zero-slash conversational gateway.
+/// All user messages (including `/start`) route to `UpdateLane::Generation`
+/// so the LLM responds naturally.
+fn is_control_message_text(_text: &str) -> bool {
+    false
 }
 
 async fn classify_update_lane(_ai_service: &AIChatService, update: &Update) -> UpdateLane {
@@ -1819,6 +1724,7 @@ async fn handle_update(
                 .await;
             return;
         }
+        let mut text = text;
         if text.is_empty()
             && image_bytes.is_none()
             && audio_bytes.is_none()
@@ -1831,21 +1737,38 @@ async fn handle_update(
             if is_group {
                 if let Some(ref bot_name) = access.bot_username {
                     let bot_tag = format!("@{bot_name}");
-                    if raw_text.split_whitespace().any(|w| {
+                    let is_bot_mention = raw_text.split_whitespace().any(|w| {
                         let cleaned = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
                         cleaned.eq_ignore_ascii_case(bot_name)
                             || cleaned.eq_ignore_ascii_case(&bot_tag[1..])
-                    }) {
-                        send_welcome(bot, ai_service, chat_id, user_id).await;
+                    });
+                    if is_bot_mention {
+                        text = "Halo Xiao!".to_string();
+                    } else {
+                        return;
                     }
+                } else {
+                    return;
                 }
+            } else {
+                return;
             }
-            return;
         }
 
         // Strict provider lock
         if !ai_service.has_configured_provider(user_id).await {
-            send_welcome(bot, ai_service, chat_id, user_id).await;
+            let _ = bot
+                .send_message(
+                    chat_id,
+                    "⚠️ <b>Xiao belum memiliki provider AI aktif.</b>\n\n\
+                     Silakan hubungkan AI provider terlebih dahulu melalui terminal host:\n\
+                     <code>xiao setup</code> atau <code>xiao ai</code>",
+                    Some("HTML"),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
             return;
         }
 
@@ -1917,12 +1840,6 @@ async fn handle_update(
                     None,
                 )
                 .await;
-            return;
-        }
-
-        // Navigation / Start
-        if command_matches(&text, "/start") {
-            send_welcome(bot, ai_service, chat_id, user_id).await;
             return;
         }
 
@@ -2140,13 +2057,13 @@ async fn main() {
         bot_username,
     });
 
-    // Register Bot Commands
-    let commands = vec![BotCommand::ephemeral("start", "Start chatting with Xiao")];
+    // Register Bot Commands - Clear all commands for pure zero-slash conversational gateway
+    let empty_commands: Vec<BotCommand> = vec![];
 
-    if let Err(e) = bot.set_my_commands(&commands).await {
-        warn!("Gagal mendaftarkan bot commands: {e}");
+    if let Err(e) = bot.set_my_commands(&empty_commands).await {
+        warn!("Gagal mengosongkan bot commands di Telegram: {e}");
     } else {
-        info!("Commands berhasil didaftarkan ke Telegram.");
+        info!("Bot commands berhasil dikosongkan (pure zero-slash gateway).");
     }
 
     let (generation_tx, mut generation_rx) = tokio::sync::mpsc::channel::<Update>(64);
@@ -2343,15 +2260,11 @@ mod update_lane_tests {
     use super::*;
 
     #[test]
-    fn known_controls_do_not_share_generation_lane() {
-        for text in ["/start", "/start@xiaobot", "/start hello"] {
-            assert!(is_control_message_text(text), "{text}");
-        }
-    }
-
-    #[test]
-    fn generation_prompts_remain_outside_control_lane() {
+    fn pure_zero_slash_routes_all_text_to_generation_lane() {
         for text in [
+            "/start",
+            "/start@xiaobot",
+            "/start hello",
             "/model",
             "Jelaskan orbit satelit",
             "/image seekor rubah di kota neon",
