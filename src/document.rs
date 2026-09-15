@@ -1,3 +1,5 @@
+pub mod archive;
+
 use regex::Regex;
 use std::io::{Cursor, Read};
 use std::path::Path;
@@ -27,7 +29,8 @@ pub struct ExtractedDocument {
 pub fn is_extractable_document(mime: &str, name: &str) -> bool {
     let mime = mime.to_ascii_lowercase();
     let name = name.to_ascii_lowercase();
-    mime.starts_with("text/")
+    archive::detect_archive_kind(&mime, &name).is_some()
+        || mime.starts_with("text/")
         || mime == "application/json"
         || mime == "application/pdf"
         || mime == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -166,6 +169,18 @@ pub async fn extract_document(
         let text = tokio::task::spawn_blocking(move || extract_xlsx_text(&bytes))
             .await
             .map_err(|err| format!("Task extractor XLSX gagal: {err}"))??;
+        Ok(ExtractedDocument {
+            text: Some(limit_text(text)),
+            ..Default::default()
+        })
+    } else if let Some(kind) = archive::detect_archive_kind(&mime, &name_lower) {
+        let bytes = data;
+        let archive_name = name.to_string();
+        let text = tokio::task::spawn_blocking(move || {
+            archive::extract_archive(&bytes, kind, &archive_name)
+        })
+        .await
+        .map_err(|err| format!("Task extractor arsip gagal: {err}"))??;
         Ok(ExtractedDocument {
             text: Some(limit_text(text)),
             ..Default::default()
@@ -522,11 +537,18 @@ mod tests {
     fn recognizes_supported_documents() {
         assert!(is_extractable_document("application/pdf", "x.bin"));
         assert!(is_extractable_document("", "notes.docx"));
-        assert!(is_extractable_document("text/plain", "file"));
-        assert!(!is_extractable_document(
+        assert!(is_extractable_document("application/zip", "bundle"));
+        assert!(is_extractable_document(
             "application/octet-stream",
             "archive.zip"
         ));
+        assert!(is_extractable_document("", "project.tar.gz"));
+        assert!(is_extractable_document("", "data.7z"));
+        assert!(!is_extractable_document(
+            "application/octet-stream",
+            "archive.iso"
+        ));
+        assert!(!is_extractable_document("", "program.exe"));
     }
 
     #[test]

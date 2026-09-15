@@ -9,7 +9,7 @@ Practical guide for AI coding agents working on the `xiao` codebase.
 `xiao` is an asynchronous daemon and CLI tool written in Rust (2021 edition) implementing a hardened, single-owner AI assistant gateway for **Telegram Bot API 10.3** with OpenAI-compatible backend providers.
 
 - **Language & Runtime**: Rust 1.80+ (CI uses 1.98.0, 2021 edition), Tokio async runtime (`full` features).
-- **Core Crates**: `reqwest` (rustls-tls, stream, multipart), `rusqlite` (bundled SQLite), `serde`/`serde_json`, `crossterm` (interactive TUI), `lopdf` + `zip` (document extraction), `tracing`/`tracing-subscriber`.
+- **Core Crates**: `reqwest` (rustls-tls, stream, multipart), `rusqlite` (bundled SQLite), `serde`/`serde_json`, `crossterm` (interactive TUI), `lopdf` + `zip` + `tar` + `flate2` + `sevenz-rust` (document & archive extraction), `tracing`/`tracing-subscriber`.
 - **Target Platforms**: Linux x86_64, Linux ARM64 (`aarch64-unknown-linux-gnu`), Android Termux (`aarch64-linux-android`).
 - **Data Directory**: `~/.local/share/xiaoai/` (database, secrets, attachments).
 
@@ -147,7 +147,7 @@ cargo run -- help                # Print CLI subcommand reference
 - **`src/timeline.rs`**: Real-time execution timeline and draft updater (`sendRichMessageDraft`) with periodic background status ticker.
 - **`src/parser/`**: Markdown AST to Telegram Bot API 10.3 `InputRichMessage` block transformer (`src/parser/markdown.rs`).
 - **`src/attachments.rs`**: Local filesystem storage and retrieval for session media attachments.
-- **`src/document.rs`**: Multi-format document parser (Text/Code, PDF native + poppler scan rendering, DOCX, XLSX).
+- **`src/document.rs`**: Multi-format document & archive parser (Text/Code, PDF native + poppler scan rendering, DOCX, XLSX, and in-memory extraction for ZIP, TAR/TAR.GZ, 7Z).
 - **`src/cli.rs`**: Interactive terminal TUI using `crossterm` for headless setup, status, and configuration.
 
 ---
