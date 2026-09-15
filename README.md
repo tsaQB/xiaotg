@@ -151,7 +151,7 @@ Antarmuka Telegram didesain ultra-clean sebagai ruang obrolan cerdas dan bebas d
 ## 🔒 Keandalan & Keamanan Sistem
 
 ### 1. Invariant Pemilik Tunggal (`OWNER_USER_ID`)
-`OWNER_USER_ID` adalah *hard invariant*. `xiao` akan menolak berjalan jika ID pemilik belum dikonfigurasi. Penggunaan bot terbatas di private chat milik owner; grup tambahan hanya dapat diizinkan melalui whitelist `ALLOWED_CHAT_IDS`.
+`OWNER_USER_ID` adalah *hard invariant*. `xiao` akan menolak berjalan jika ID pemilik belum dikonfigurasi. Hanya pemilik tunggal yang dapat memberi perintah ke bot. Penggunaan bot terbuka di private chat serta grup/forum topic di mana owner berada; Anda juga dapat membatasi grup tertentu secara spesifik melalui whitelist `ALLOWED_CHAT_IDS`.
 
 ### 2. Isolasi Kredensial Lokal (`secret://...`)
 Token bot dan kunci API provider tidak disimpan dalam teks polos di database konfigurasi. Database hanya menyimpan referensi URI bertipe `secret://...`, sementara nilai rahasia disimpan di direktori terisolasi `~/.local/share/xiaoai/secrets/` dengan izin akses Unix yang diperketat (`0700` direktori, `0600` berkas).
@@ -176,7 +176,7 @@ cp .env.example .env
 | :--- | :--- | :--- |
 | `BOT_TOKEN` | Token otentikasi dari `@BotFather` | *(Wajib)* |
 | `OWNER_USER_ID` | Telegram User ID pemilik bot | *(Wajib)* |
-| `ALLOWED_CHAT_IDS` | Daftar ID chat/grup yang diizinkan (dipisah koma) | *(Kosong = Private Only)* |
+| `ALLOWED_CHAT_IDS` | Batasi hanya grup tertentu (dipisah koma) | *(Kosong = Izinkan semua grup owner)* |
 | `AI_ENDPOINT` | URL dasar endpoint OpenAI-compatible | `https://api.openai.com/v1` |
 | `AI_API_KEY` | Kunci API provider AI aktif | *(Opsional jika keyless)* |
 | `AI_MODEL` | ID model utama yang digunakan | `gpt-4o-mini` |

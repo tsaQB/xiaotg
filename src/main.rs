@@ -72,12 +72,20 @@ fn build_audio_chat_input<'a>(
 struct AccessPolicy {
     owner_user_id: i64,
     allowed_chat_ids: HashSet<i64>,
+    bot_username: Option<String>,
 }
 
 impl AccessPolicy {
     fn allows(&self, user_id: i64, chat_id: i64) -> bool {
-        user_id == self.owner_user_id
-            && (chat_id == self.owner_user_id || self.allowed_chat_ids.contains(&chat_id))
+        if user_id != self.owner_user_id {
+            return false;
+        }
+        if chat_id == self.owner_user_id {
+            return true;
+        }
+        // If specific allowed_chat_ids are configured, enforce the whitelist.
+        // If allowed_chat_ids is empty, allow owner in any group/topic.
+        self.allowed_chat_ids.is_empty() || self.allowed_chat_ids.contains(&chat_id)
     }
 
     fn allows_stop_chat(&self, chat_id: i64) -> bool {
@@ -85,6 +93,57 @@ impl AccessPolicy {
         // another group participant from cancelling the owner's request, native
         // Stop is accepted only in the owner's private chat.
         chat_id == self.owner_user_id
+    }
+}
+
+fn prepare_incoming_chat_text(
+    raw_text: &str,
+    is_group: bool,
+    bot_username: Option<&str>,
+    is_reply_to_bot: bool,
+) -> Option<String> {
+    let trimmed = raw_text.trim();
+    if !is_group {
+        return Some(trimmed.to_string());
+    }
+
+    let Some(bot_name) = bot_username else {
+        return Some(trimmed.to_string());
+    };
+
+    let bot_tag = format!("@{bot_name}");
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+
+    let has_bot_tag = words.iter().any(|w| {
+        let cleaned = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+        cleaned.eq_ignore_ascii_case(bot_name) || cleaned.eq_ignore_ascii_case(&bot_tag[1..])
+    });
+
+    let mentions_other = words.iter().any(|w| {
+        if let Some(mention) = w.strip_prefix('@') {
+            let handle = mention.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+            !handle.is_empty() && !handle.eq_ignore_ascii_case(bot_name)
+        } else {
+            false
+        }
+    });
+
+    if mentions_other && !has_bot_tag && !is_reply_to_bot {
+        return None;
+    }
+
+    if has_bot_tag {
+        let remaining: Vec<&str> = words
+            .into_iter()
+            .filter(|w| {
+                let cleaned = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                !cleaned.eq_ignore_ascii_case(bot_name)
+                    && !cleaned.eq_ignore_ascii_case(&bot_tag[1..])
+            })
+            .collect();
+        Some(remaining.join(" "))
+    } else {
+        Some(trimmed.to_string())
     }
 }
 
@@ -1549,13 +1608,38 @@ async fn handle_update(
             .as_ref()
             .map(|u| u.first_name.as_str())
             .unwrap_or("Pengguna");
-        let text = msg
+        let raw_text = msg
             .text
             .as_deref()
             .or(msg.caption.as_deref())
             .unwrap_or("")
-            .trim()
-            .to_string();
+            .trim();
+
+        let is_group = chat_id != user_id;
+        let is_reply_to_bot = msg
+            .reply_to_message
+            .as_ref()
+            .and_then(|r| r.from.as_ref())
+            .map(|u| {
+                if let Some(ref my_bot) = access.bot_username {
+                    u.username
+                        .as_deref()
+                        .unwrap_or("")
+                        .eq_ignore_ascii_case(my_bot)
+                } else {
+                    u.is_bot
+                }
+            })
+            .unwrap_or(false);
+
+        let Some(text) = prepare_incoming_chat_text(
+            raw_text,
+            is_group,
+            access.bot_username.as_deref(),
+            is_reply_to_bot,
+        ) else {
+            return;
+        };
 
         let mut image_bytes = None;
         let mut document_images = None;
@@ -1744,8 +1828,18 @@ async fn handle_update(
                 .as_ref()
                 .is_none_or(|pages| pages.is_empty())
         {
-            // Ignore Telegram service/metadata messages instead of turning an
-            // empty payload into an unsolicited AI generation.
+            if is_group {
+                if let Some(ref bot_name) = access.bot_username {
+                    let bot_tag = format!("@{bot_name}");
+                    if raw_text.split_whitespace().any(|w| {
+                        let cleaned = w.trim_matches(|c: char| !c.is_alphanumeric() && c != '_');
+                        cleaned.eq_ignore_ascii_case(bot_name)
+                            || cleaned.eq_ignore_ascii_case(&bot_tag[1..])
+                    }) {
+                        send_welcome(bot, ai_service, chat_id, user_id).await;
+                    }
+                }
+            }
             return;
         }
 
@@ -2008,16 +2102,12 @@ async fn main() {
         error!("OWNER_USER_ID belum dikonfigurasi. Jalankan `xiao gateway` atau `xiao setup`.");
         return;
     };
-    let access = Arc::new(AccessPolicy {
-        owner_user_id,
-        allowed_chat_ids: get_allowed_chat_ids(),
-    });
 
     let bot = TelegramBotClient::new(token);
     let user_last_image_prompt: UserLastImagePrompt = Arc::new(RwLock::new(HashMap::new()));
 
-    // Test connection
-    match bot.get_me().await {
+    // Test connection & get bot identity
+    let bot_username = match bot.get_me().await {
         Ok(resp) if resp.ok => {
             let Some(bot_info) = resp.result else {
                 error!("Telegram getMe returned ok=true without a result");
@@ -2025,10 +2115,11 @@ async fn main() {
             };
             println!(
                 "\n🚀 xiao @{} online menggunakan Telegram Bot API 10.3!",
-                bot_info.username.unwrap_or_default()
+                bot_info.username.as_deref().unwrap_or_default()
             );
             println!("⚡ Streaming Timeline + Native Stop Active!");
             println!("🌐 Custom OpenAI-Compatible Provider Setup Active (via CLI)\n");
+            bot_info.username
         }
         Ok(resp) => {
             error!(
@@ -2041,7 +2132,13 @@ async fn main() {
             error!("HTTP connection error: {e}");
             return;
         }
-    }
+    };
+
+    let access = Arc::new(AccessPolicy {
+        owner_user_id,
+        allowed_chat_ids: get_allowed_chat_ids(),
+        bot_username,
+    });
 
     // Register Bot Commands
     let commands = vec![BotCommand::ephemeral("start", "Start chatting with Xiao")];
@@ -2370,11 +2467,92 @@ mod update_lane_tests {
         let policy = AccessPolicy {
             owner_user_id: 42,
             allowed_chat_ids: [100, 200].into_iter().collect(),
+            bot_username: Some("xiao_bot".to_string()),
         };
         assert!(policy.allows_stop_chat(42));
         assert!(!policy.allows_stop_chat(100));
         assert!(!policy.allows_stop_chat(200));
         assert!(!policy.allows_stop_chat(999));
+    }
+
+    #[test]
+    fn access_policy_allows_owner_in_private_and_groups_when_whitelist_empty() {
+        let policy = AccessPolicy {
+            owner_user_id: 42,
+            allowed_chat_ids: HashSet::new(),
+            bot_username: Some("Sms2tg_bot".to_string()),
+        };
+        // Owner in private chat
+        assert!(policy.allows(42, 42));
+        // Owner in supergroup / topic group (negative chat ID)
+        assert!(policy.allows(42, -1001234567890));
+        // Non-owner in private or group is rejected
+        assert!(!policy.allows(999, 999));
+        assert!(!policy.allows(999, -1001234567890));
+    }
+
+    #[test]
+    fn access_policy_enforces_whitelist_when_configured() {
+        let policy = AccessPolicy {
+            owner_user_id: 42,
+            allowed_chat_ids: [-100111, -100222].into_iter().collect(),
+            bot_username: Some("Sms2tg_bot".to_string()),
+        };
+        // Private chat always allowed for owner
+        assert!(policy.allows(42, 42));
+        // Whitelisted groups allowed for owner
+        assert!(policy.allows(42, -100111));
+        assert!(policy.allows(42, -100222));
+        // Non-whitelisted group rejected
+        assert!(!policy.allows(42, -100999));
+        // Non-owner always rejected even in whitelisted group
+        assert!(!policy.allows(999, -100111));
+    }
+
+    #[test]
+    fn incoming_chat_text_handles_group_mentions_and_isolation() {
+        let bot_name = "Sms2tg_bot";
+        // Private chat keeps text as is
+        assert_eq!(
+            prepare_incoming_chat_text("Hai", false, Some(bot_name), false),
+            Some("Hai".to_string())
+        );
+
+        // Group chat with no mention to anyone: responds
+        assert_eq!(
+            prepare_incoming_chat_text("Hai", true, Some(bot_name), false),
+            Some("Hai".to_string())
+        );
+
+        // Group chat mentioning this bot: strips mention
+        assert_eq!(
+            prepare_incoming_chat_text("Tes @Sms2tg_bot", true, Some(bot_name), false),
+            Some("Tes".to_string())
+        );
+        assert_eq!(
+            prepare_incoming_chat_text("@Sms2tg_bot /start", true, Some(bot_name), false),
+            Some("/start".to_string())
+        );
+        assert_eq!(
+            prepare_incoming_chat_text("Hello @Sms2tg_bot", true, Some(bot_name), false),
+            Some("Hello".to_string())
+        );
+        assert_eq!(
+            prepare_incoming_chat_text("Hi @sms2tg_bot", true, Some(bot_name), false),
+            Some("Hi".to_string())
+        );
+
+        // Group chat mentioning another user/bot: ignored
+        assert_eq!(
+            prepare_incoming_chat_text("Hai @mira", true, Some(bot_name), false),
+            None
+        );
+
+        // Group chat replying to bot: responded even without mention
+        assert_eq!(
+            prepare_incoming_chat_text("Jawaban bagus", true, Some(bot_name), true),
+            Some("Jawaban bagus".to_string())
+        );
     }
 
     #[test]
