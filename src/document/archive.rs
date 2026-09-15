@@ -491,8 +491,7 @@ fn extract_tar(
 
 fn extract_7z(data: &[u8]) -> Result<(Vec<ExtractedArchiveItem>, ArchiveExtractionBudget), String> {
     let cursor = Cursor::new(data);
-    let len = data.len() as u64;
-    let mut reader = sevenz_rust::SevenZReader::new(cursor, len, sevenz_rust::Password::empty())
+    let mut reader = sevenz_rust::ArchiveReader::new(cursor, sevenz_rust::Password::empty())
         .map_err(|err| format!("7Z invalid: {err}"))?;
 
     let mut items = Vec::new();
@@ -782,12 +781,9 @@ mod tests {
     #[test]
     fn extracts_7z_archive_in_memory() {
         let cursor = Cursor::new(Vec::new());
-        let mut sz = sevenz_rust::SevenZWriter::new(cursor).unwrap();
+        let mut sz = sevenz_rust::ArchiveWriter::new(cursor).unwrap();
 
-        let mut entry = sevenz_rust::SevenZArchiveEntry::default();
-        entry.name = "hello.rs".to_string();
-        entry.is_directory = false;
-        entry.has_stream = true;
+        let entry = sevenz_rust::ArchiveEntry::new_file("hello.rs");
 
         let data = b"pub fn greet() -> &'static str { \"Halo Xiao\" }";
         sz.push_archive_entry(entry, Some(&data[..])).unwrap();

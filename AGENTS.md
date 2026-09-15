@@ -9,7 +9,7 @@ Practical guide for AI coding agents working on the `xiao` codebase.
 `xiao` is an asynchronous daemon and CLI tool written in Rust (2021 edition) implementing a hardened, single-owner AI assistant gateway for **Telegram Bot API 10.3** with OpenAI-compatible backend providers.
 
 - **Language & Runtime**: Rust 1.80+ (CI uses 1.98.0, 2021 edition), Tokio async runtime (`full` features).
-- **Core Crates**: `reqwest` (rustls-tls, stream, multipart), `rusqlite` (bundled SQLite), `serde`/`serde_json`, `crossterm` (interactive TUI), `lopdf` + `zip` + `tar` + `flate2` + `sevenz-rust` (document & archive extraction), `tracing`/`tracing-subscriber`.
+- **Core Crates**: `reqwest` (rustls-tls, stream, multipart), `rusqlite` (bundled SQLite), `serde`/`serde_json`, `crossterm` (interactive TUI), `lopdf` + `zip` + `tar` + `flate2` + `sevenz-rust2` (document & archive extraction), `tracing`/`tracing-subscriber`.
 - **Target Platforms**: Linux x86_64, Linux ARM64 (`aarch64-unknown-linux-gnu`), Android Termux (`aarch64-linux-android`).
 - **Data Directory**: `~/.local/share/xiaoai/` (database, secrets, attachments).
 
